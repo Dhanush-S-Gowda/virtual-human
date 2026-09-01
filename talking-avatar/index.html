@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    />
+
+    <title>Local TalkingHead Avatar</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+
+            overflow: hidden;
+
+            font-family:
+                Inter,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+
+            background: #111;
+        }
+
+        #app {
+            position: relative;
+
+            width: 100%;
+            height: 100%;
+        }
+
+        /*
+         * TalkingHead renders the Three.js scene here.
+         */
+        #avatar {
+            position: absolute;
+
+            inset: 0;
+
+            width: 100%;
+            height: 100%;
+        }
+
+        /*
+         * Status indicator.
+         */
+        #status {
+            position: absolute;
+
+            top: 20px;
+            left: 20px;
+
+            z-index: 10;
+
+            padding: 8px 12px;
+
+            border-radius: 8px;
+
+            background: rgba(0, 0, 0, 0.65);
+
+            color: white;
+
+            font-size: 14px;
+        }
+
+        /*
+         * Loading indicator.
+         */
+        #loading {
+            position: absolute;
+
+            left: 50%;
+            top: 50%;
+
+            transform: translate(-50%, -50%);
+
+            z-index: 20;
+
+            color: white;
+
+            font-size: 18px;
+        }
+
+        /*
+         * Bottom control panel.
+         */
+        #controls {
+            position: absolute;
+
+            left: 20px;
+            right: 20px;
+            bottom: 20px;
+
+            z-index: 10;
+
+            display: flex;
+
+            flex-wrap: wrap;
+
+            gap: 8px;
+
+            padding: 12px;
+
+            border-radius: 12px;
+
+            background: rgba(0, 0, 0, 0.75);
+
+            backdrop-filter: blur(10px);
+        }
+
+        #speechText {
+            flex: 1 1 300px;
+
+            min-width: 200px;
+
+            padding: 10px 12px;
+
+            border: 1px solid #555;
+
+            border-radius: 7px;
+
+            outline: none;
+
+            background: #222;
+
+            color: white;
+
+            font-size: 15px;
+        }
+
+        #controls button {
+            padding: 10px 14px;
+
+            border: none;
+
+            border-radius: 7px;
+
+            background: #333;
+
+            color: white;
+
+            cursor: pointer;
+
+            font-size: 14px;
+
+            transition:
+                background 0.15s ease,
+                transform 0.1s ease;
+        }
+
+        #controls button:hover {
+            background: #444;
+        }
+
+        #controls button:active {
+            transform: scale(0.97);
+        }
+
+        #controls button.primary {
+            background: #2563eb;
+        }
+
+        #controls button.primary:hover {
+            background: #1d4ed8;
+        }
+
+        #controls button.danger {
+            background: #991b1b;
+        }
+
+        @media (max-width: 700px) {
+            #controls {
+                left: 10px;
+                right: 10px;
+                bottom: 10px;
+            }
+
+            #status {
+                top: 10px;
+                left: 10px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div id="app">
+
+    <!-- TalkingHead renders here -->
+    <div id="avatar"></div>
+
+    <!-- Status -->
+    <div id="status">
+        Initializing...
+    </div>
+
+    <!-- Loading -->
+    <div id="loading">
+        Loading avatar...
+    </div>
+
+    <!-- Controls -->
+    <div id="controls">
+
+        <input
+            id="speechText"
+            type="text"
+            value="Hello! I am your avatar."
+            placeholder="Type something to say..."
+        />
+
+        <button
+            id="speakButton"
+            class="primary"
+        >
+            Speak
+        </button>
+
+        <button id="idleButton">
+            Idle
+        </button>
+
+        <button id="waveButton">
+            Wave
+        </button>
+
+        <button id="danceButton">
+            Dance
+        </button>
+
+        <button id="poseButton">
+            Pose
+        </button>
+
+        <button id="thumbButton">
+            👍
+        </button>
+
+        <button id="happyButton">
+            Happy
+        </button>
+
+        <button id="neutralButton">
+            Neutral
+        </button>
+
+        <button id="stopButton" class="danger">
+            Stop
+        </button>
+
+    </div>
+
+</div>
+
+<script type="module" src="/src/main.js"></script>
+
+</body>
+</html>
