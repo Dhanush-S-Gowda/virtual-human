@@ -1,375 +1,111 @@
-# Virtual Human - Local 3D Talking Avatar
+# Virtual Human
 
-A complete, self-hosted 3D virtual human application powered by **Three.js**, **TalkingHead**, **Kokoro TTS**, **faster-whisper STT**, and **Qwen3-8B** running locally on your GPU. It renders an interactive 3D avatar in the browser with real-time lip-synchronization, keyboard push-to-talk speech recognition, facial expressions, and full-body gestures.
+Local talking avatar with an HTTP backend, Ollama Qwen3.5 2B, Kokoro speech synthesis, and faster-whisper transcription.
 
----
+## Start
 
-## 🚀 Quick Start (One Command)
-
-```powershell
-# In the project root — starts llama.cpp + all Docker services
-.\Start-VirtualHuman.ps1
-```
-
-Then open **http://localhost:4173** and hold `Space` to talk.
+Start Docker Desktop with NVIDIA GPU support, then run:
 
 ```powershell
-# Stop everything
-.\Start-VirtualHuman.ps1 -Stop
-
-# Rebuild Docker images then start
 .\Start-VirtualHuman.ps1 -Rebuild
 ```
 
-> **First run?** Download the model first:
-> ```powershell
-> llama download --hf-repo Qwen/Qwen3-8B-GGUF --hf-file qwen3-8b-q4_k_m.gguf
-> ```
-
----
-
-## 🌟 Key Features
-
-- **One-Command Launch**: `Start-VirtualHuman.ps1` starts llama.cpp (GPU) + all Docker services automatically.
-- **Local Speech-to-Text (STT)**: Fast and private transcription powered by `faster-whisper` running locally on CPU or GPU.
-- **Local LLM**: Qwen3-8B Q4_K_M via llama.cpp on RTX 4050 (Vulkan) — no cloud API, fully private.
-- **Keyboard Push-to-Talk**: Hold <kbd>Space</kbd> to record speech, release to transcribe with visual state indicators and automatic input-field passthrough.
-- **Real-Time 3D Rendering**: Built on Three.js and TalkingHead with full support for GLB/glTF avatar models, skeletal rigs, and morph targets.
-- **Accurate Lip-Sync**: Timed phoneme and viseme matching powered by Kokoro's word-level timestamp generation.
-- **Natural Gestures & Expressions**: Built-in support for idle breathing, blinking, head tracking, mood adjustments (happy/neutral), and animations (waving, dancing, posing, thumbs-up).
-- **100% Local & Privacy-Friendly**: Runs entirely on your local machine without any cloud APIs or subscriptions.
-- **Microservices Architecture**: Modular Docker stack dividing 3D rendering, speech synthesis, and audio transcription.
-
----
-
-## 🏗️ Architecture
-
-
-```mermaid
-flowchart LR
-    subgraph Browser ["Frontend (Port 4173 / 5173)"]
-        UI["Web UI\n(Vite + Three.js)"]
-        PTT["KeyboardPushToTalk\n(Spacebar Listener)"]
-        STTM["STTManager\n(MediaRecorder)"]
-        TH["TalkingHead\nAnimation & Lipsync Engine"]
-        AC["AvatarController\n(State Abstraction)"]
-    end
-
-    subgraph STTService ["STT Backend (Port 8001)"]
-        STT["stt-server\n(FastAPI + faster-whisper)"]
-    end
-
-    subgraph TTSService ["TTS Backend (Port 8000)"]
-        TTS["tts-server\n(Python / FastAPI)"]
-    end
-
-    subgraph InferenceEngine ["TTS Engine (Port 8880)"]
-        KOKORO["Kokoro FastAPI\n(PyTorch / Neural TTS)"]
-    end
-
-    %% STT Pipeline
-    PTT -->|Hold Space| STTM
-    STTM -->|Audio recording| STT
-    STT -->|Transcribed text| UI
-    PTT -->|State updates| AC
-    AC -->|Attentive gaze / mood| TH
-
-    %% TTS Pipeline
-    UI -->|Submit text & action| TH
-    TH -->|POST /synthesize| TTS
-    TTS -->|POST /dev/captioned_speech| KOKORO
-    KOKORO -->|WAV audio + timestamps| TTS
-    TTS -->|Base64 audio + wtimes| TH
-    TH -->|Play audio & animate lips| UI
-```
-
-### Components
-
-1. **`talking-avatar` (Frontend)**:
-   - **Stack**: Vite, Three.js, TalkingHead library.
-   - **Modules**:
-     - `src/stt/STTManager.js`: Manages microphone capture, audio formats, track release, and API calls.
-     - `src/stt/keyboardPushToTalk.js`: Spacebar push-to-talk handler, ignores auto-repeat, avoids page scrolling, and skips text inputs.
-     - `src/avatar/AvatarController.js`: State manager decoupling application states (`idle`, `listening`, `speaking`, `thinking`) from TalkingHead.
-   - **Port**: `4173` (Docker preview) or `5173` (Vite local dev).
-
-2. **`stt-server` (Speech-to-Text Middleware)**:
-   - **Stack**: Python 3.12, FastAPI, `faster-whisper`, FFmpeg.
-   - **Role**: Receives audio uploads (WebM/Opus/WAV), runs local Whisper model inference, and returns text transcripts with language and duration.
-   - **Port**: `8001`.
-
-3. **`tts-server` (Text-to-Speech Middleware)**:
-   - **Stack**: Python 3.12, FastAPI, Uvicorn, HTTPX.
-   - **Role**: Validates requests, formats payloads for Kokoro, extracts and normalizes word start times and durations (in milliseconds).
-   - **Port**: `8000`.
-
-4. **`kokoro` (Speech Synthesis Engine)**:
-   - **Image**: `ghcr.io/remsky/kokoro-fastapi-cpu:latest`.
-   - **Role**: Fast CPU-based neural text-to-speech inference producing high-quality audio along with captioned speech timestamps.
-   - **Port**: `8880`.
-
----
-
-## 📂 Project Structure
-
-```
-virtual-human/
-├── docker-compose.yml          # Multi-container orchestration (Kokoro, TTS, STT, Avatar)
-├── .dockerignore               # Docker context ignore rules
-├── Readme.md                   # Project documentation
-│
-├── stt-server/                 # Speech-to-Text service
-│   ├── Dockerfile              # Python 3.12 container with ffmpeg
-│   ├── requirements.txt        # faster-whisper, FastAPI, uvicorn, python-multipart
-│   └── main.py                 # FastAPI service preloading Whisper model
-│
-├── talking-avatar/             # Frontend application
-│   ├── Dockerfile              # Production Node/Vite container
-│   ├── vite.config.js          # Vite config with API proxy for /api/tts & /api/stt
-│   ├── package.json            # NPM dependencies (Three.js, Vite)
-│   ├── index.html              # UI layout, transcript box & PTT banner
-│   ├── public/
-│   │   ├── avatars/            # 3D GLB Models (brunette.glb, avaturn.glb, etc.)
-│   │   ├── animations/         # FBX animations (walking.fbx, etc.)
-│   │   └── poses/              # Custom poses (dance.fbx, etc.)
-│   └── src/
-│       ├── main.js             # Bootstrap, UI controls & event binding
-│       ├── avatar/
-│       │   └── AvatarController.js # Avatar state abstraction (listening, idle, etc.)
-│       ├── stt/
-│       │   ├── STTManager.js       # Audio recording & transcription manager
-│       │   └── keyboardPushToTalk.js # Spacebar push-to-talk handler
-│       └── talkinghead/        # TalkingHead library and lip-sync modules
-│
-└── tts-server/                 # Text-to-Speech service
-    ├── Dockerfile              # Python 3.12 container
-    └── main.py                 # FastAPI service bridging avatar to Kokoro
-```
-
----
-
-## 🚀 Quick Start (Docker Compose)
-
-### Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
-- WSL2 backend enabled (on Windows).
-
-### 1. Start all services
-
-Run from the root directory:
-
-```bash
-docker compose up --build -d
-```
-
-### 2. Access the Application
-
-Once the containers are up, open your browser:
-
-| Service | URL | Description |
-|---|---|---|
-| **Avatar Web UI** | [http://localhost:4173](http://localhost:4173) | Main 3D avatar interface with STT & TTS |
-| **STT Server API Docs** | [http://localhost:8001/docs](http://localhost:8001/docs) | Swagger UI for speech-to-text service |
-| **TTS Server API Docs** | [http://localhost:8000/docs](http://localhost:8000/docs) | Swagger UI for speech synthesis middleware |
-| **Kokoro Engine Docs** | [http://localhost:8880/docs](http://localhost:8880/docs) | Swagger UI for Kokoro TTS engine |
-
-### 3. Container Management
-
-```bash
-# Check status of all containers
-docker compose ps
-
-# View live logs for STT service
-docker compose logs -f stt-server
-
-# Stop all containers
-docker compose down
-```
-
----
-
-## 🎤 How to Use Push-to-Talk (STT)
-
-1. Click on the 3D avatar window to ensure the browser has focus.
-2. **Press and hold the <kbd>Space</kbd> key**:
-   - The indicator will show `🔴 LISTENING... Release SPACE when finished`.
-   - The avatar enters the attentive `listening` state.
-3. **Speak into your microphone**: (e.g., *"Hello! Can you help me?"*).
-4. **Release <kbd>Space</kbd>**:
-   - Recording stops immediately and releases microphone tracks.
-   - The indicator transitions to `⏳ TRANSCRIBING...`.
-   - faster-whisper transcribes your voice locally.
-   - The transcript is displayed under **Conversation**:
-     ```text
-     You said:
-     "Hello! Can you help me?"
-     ```
-5. **Typing in Text Inputs**:
-   - If you click inside the text input box, pressing <kbd>Space</kbd> enters a normal space character without triggering speech recognition.
-
----
-
-## ⚙️ STT Configuration (Environment Variables)
-
-Configure the Whisper model in `docker-compose.yml` or through environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `WHISPER_MODEL` | `base` | Model size: `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `WHISPER_DEVICE` | `cpu` | Inference device: `cpu` or `cuda` |
-| `WHISPER_COMPUTE_TYPE` | `int8` | Precision: `int8`, `float32`, or `float16` (for GPU) |
-
----
-
-## 📡 API Reference
-
-### 1. STT Service (`stt-server`)
-
-#### `GET /health`
-Returns service status and engine metadata:
-```json
-{
-  "status": "ok",
-  "service": "stt-server",
-  "model": "faster-whisper"
-}
-```
-
-#### `POST /transcribe`
-Accepts `multipart/form-data` with an `audio` file (`.webm`, `.wav`, `.ogg`):
-```bash
-curl -X POST "http://localhost:8001/transcribe" \
-     -F "audio=@recording.webm"
-```
-**Response**:
-```json
-{
-  "text": "Hello world, this is a test.",
-  "language": "en",
-  "duration": 2.41
-}
-```
-
-### 2. TTS Service (`tts-server`)
-
-#### `POST /synthesize`
-Generates base64 WAV audio and word-level timing markers for TalkingHead.
-```json
-{
-  "text": "Hello! I am your virtual human.",
-  "voice": "af_bella",
-  "speed": 1.0
-}
-```
-
----
-
-## ❓ Troubleshooting
-
-| Issue | Cause | Solution |
-|---|---|---|
-| **"Microphone permission is required"** | Browser blocked microphone access | Allow microphone permissions in your browser URL bar. |
-| **"Speech recognition service is unavailable"** | `stt-server` container is stopped | Run `docker compose up -d stt-server` and verify port 8001. |
-| **Spacebar scrolls the page** | Push-to-talk handler not focused | Click anywhere on the avatar canvas to focus the window. |
-| **"No speech detected"** | Spacebar pressed too briefly or silent input | Hold Spacebar firmly while speaking clearly, then release. |
-| **"The local LLM is not running"** | llama.cpp not started on Windows host | Follow the LOCAL LLM SETUP section below. |
-| **LLM takes >2 minutes to respond** | Model too large for available VRAM | Ensure Vulkan0 (RTX 4050) is selected, not Vulkan1 (Intel). |
-
----
-
-## 🧠 LOCAL LLM SETUP
-
-The LLM runs **directly on your Windows host** (not in Docker) so it can access the RTX 4050 Laptop GPU via Vulkan.
-
-> **Hardware:** Windows 11 · NVIDIA RTX 4050 Laptop GPU (6 GB VRAM) · 16 GB RAM  
-> **LLM Runtime:** llama.cpp 0.5.0-dev Build 11149 (Clang 20, Windows x86_64)  
-> **Model:** Qwen3-8B Q4_K_M (~4.9 GB)
-
-### Step 1 — Download the model
+The launcher starts Ollama, pulls `qwen3.5:2b` into a persistent volume, and starts the services. Open http://localhost:4173. Hold Space to speak; release it to transcribe, generate a reply, and speak that reply with lip synchronization.
 
 ```powershell
-llama download --hf-repo Qwen/Qwen3-8B-GGUF --hf-file qwen3-8b-q4_k_m.gguf
+.\Start-VirtualHuman.ps1 -Stop
+docker compose logs -f tts-server stt-server
 ```
 
-The model file is saved to the llama.cpp model cache (typically `%USERPROFILE%\.llama\models`).
-
-### Step 2 — Start llama.cpp server
-
-Open a **PowerShell terminal** (separate from Docker) and run:
-
-```powershell
-llama serve `
-  --hf-repo  Qwen/Qwen3-8B-GGUF `
-  --hf-file  qwen3-8b-q4_k_m.gguf `
-  --device   Vulkan0 `
-  --gpu-layers 99 `
-  --ctx-size 2048 `
-  --parallel 1 `
-  --host     0.0.0.0 `
-  --port     8080 `
-  --reasoning off
-```
-
-> **Important:** `--device Vulkan0` = NVIDIA RTX 4050. `Vulkan1` = Intel GPU — do **not** use that.
-
-### Step 3 — Verify it is running
-
-```powershell
-Invoke-RestMethod http://localhost:8080/health
-```
-
-Expected: `{"status":"ok"}` or `{"status":"loading model"}`.
-
-You can also check from the Docker side via the tts-server health endpoint:
-
-```powershell
-Invoke-RestMethod http://localhost:8000/llm/health
-```
-
-Expected:
-
-```json
-{
-  "available": true,
-  "enabled": true,
-  "base_url": "http://host.docker.internal:8080",
-  "model": "Qwen3-8B-Q4_K_M"
-}
-```
-
-### Step 4 — Start the Docker stack
-
-```powershell
-docker compose up -d
-```
-
-### Full Pipeline After Setup
+## Modular backend
 
 ```text
-Hold SPACE → speak → release SPACE
-        ↓
-  faster-whisper (Docker, port 8001)
-        ↓
-   transcript text
-        ↓
-  tts-server /chat (Docker, port 8000)
-        ↓
-  llama.cpp /v1/chat/completions (Windows host, port 8080)
-        ↓
-  Qwen3-8B on RTX 4050 (Vulkan0)
-        ↓
-   LLM reply displayed in browser
+main.py                         Single HTTP server entry point
+backend/
+  app.py                        Startup, CORS, errors, latency logging
+  config.py                     Environment configuration and prompt loading
+  schemas.py                    Shared request and response contracts
+  providers.py                  Provider registry and construction
+  conversation.py               Session history and chat orchestration
+  api/routes.py                 HTTP transport and endpoint wiring
+  llm/
+    base.py                     LLM provider interface
+    ollama.py                   Ollama implementation
+    prompts/system.txt          Exactly 300 nonempty instruction lines
+  tts/
+    base.py                     TTS provider interface
+    kokoro.py                   Kokoro audio and word timings
+  stt/
+    base.py                     STT provider interface
+    whisper_http.py             Gateway adapter for the Whisper worker
+    whisper_engine.py           Isolated faster-whisper worker
+  Dockerfile                    Main API image
+  requirements.txt              Main API dependencies
+tests/test_backend.py           Backend contract tests
 ```
 
-### Environment Variables (docker-compose.yml)
+Run the main server locally with `pip install -r backend/requirements.txt`, then `python main.py`. Set `LLM_BASE_URL=http://localhost:11434`, `KOKORO_URL=http://localhost:8880`, and `STT_BASE_URL=http://localhost:8001` when using locally published Docker providers.
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_ENABLED` | `true` | Enable/disable LLM integration |
-| `LLM_BASE_URL` | `http://host.docker.internal:8080` | llama.cpp server URL (from Docker) |
-| `LLM_MODEL` | `Qwen3-8B-Q4_K_M` | Model name sent in API requests |
-| `LLM_TEMPERATURE` | `0.7` | Sampling temperature |
-| `LLM_MAX_TOKENS` | `256` | Max reply length in tokens |
-| `LLM_TIMEOUT` | `120` | HTTP read timeout (seconds) |
-| `LLM_HISTORY_TURNS` | `8` | Rolling conversation turns to keep |
+The Compose service name `tts-server` is retained for compatibility, but it now runs the main API, not just TTS. The browser sends STT, LLM, and TTS requests through port 8000. Ollama, Kokoro, and the isolated Whisper worker remain separate model processes so heavy model dependencies do not enter the API process. The old `llm-server/main.py`, `tts-server/main.py`, and `stt-server/main.py` are compatibility launchers; their implementations live under `backend/`.
+
+There is no WebSocket endpoint. HTTP is the current transport.
+
+## Add a model or SDK
+
+Implement the domain's `base.py` interface in a new module under `backend/llm`, `backend/tts`, or `backend/stt`. Register its constructor in `backend/providers.py` and select it with `LLM_PROVIDER`, `TTS_PROVIDER`, or `STT_PROVIDER`. Keep SDK imports and provider response conversion inside that module. Install new SDK dependencies in the appropriate image. Routes, conversation history, and avatar playback do not need provider-specific changes.
+
+LLM adapters return plain reply text. TTS adapters return base64 WAV audio plus `words`, `wtimes`, and `wdurations` in milliseconds; these timings are required for lip synchronization. STT adapters return `text`, `language`, and audio `duration`.
+
+## Prompt and configuration
+
+The default prompt is `backend/llm/prompts/system.txt`, containing 300 instruction lines for the conversational avatar. Edit it and rebuild the main API image to apply changes. Override the path with `LLM_SYSTEM_PROMPT_FILE` or the entire prompt with `LLM_SYSTEM_PROMPT`. Prompt files are read once at server startup.
+
+| Variable | Default |
+|---|---|
+| LLM_PROVIDER | ollama |
+| LLM_MODEL | qwen3.5:2b |
+| LLM_BASE_URL | http://ollama:11434 |
+| LLM_CONTEXT_LENGTH | 8192 |
+| LLM_MAX_TOKENS | 256 |
+| LLM_TEMPERATURE | 0.7 |
+| LLM_HISTORY_TURNS | 8 |
+| LLM_TIMEOUT | 120 seconds |
+| TTS_PROVIDER | kokoro |
+| KOKORO_URL | http://kokoro:8880 |
+| STT_PROVIDER | whisper-http |
+| STT_BASE_URL | http://stt-server:8001 |
+
+Thinking is disabled for concise spoken responses. Browser sessions use separate IDs for history. History is held in memory with at most 128 sessions, eight turns per session by default; restart or eviction clears it. HTTP callers should supply a unique `session_id`; omitted IDs use the shared compatibility session `default`.
+
+## HTTP API
+
+- `GET /health`: main server status.
+- `GET /llm/health`: configured model availability.
+- `POST /chat`: `message`, optional `session_id`, optional `reset_history`; returns `reply` and `history_length`.
+- `POST /synthesize`: `text`, optional `voice` and `speed`; returns audio and lip-sync timings.
+- `POST /transcribe`: multipart `audio` file, at most 10 MB; returns recognized text, language, and recording duration.
+
+API documentation: http://localhost:8000/docs. The front end requests transcription, chat, and synthesis in sequence. `main.py` hosts and routes all three HTTP operations.
+
+## Latency
+
+Backend logs show STT, LLM, and TTS request times in milliseconds. The Ollama adapter additionally logs model loading, prompt evaluation, and token generation. These exclude microphone capture and browser playback. First requests may include model loading and prompt cache initialization; measure repeated requests separately. A 300-line prompt increases prompt processing and context usage.
+
+Run contract tests in the API image:
+
+```powershell
+Get-Content -Raw tests/test_backend.py | docker compose run --rm --no-deps -T tts-server python -
+```
+
+### Measured with the 300-line prompt
+
+Test input: "Hello, how are you today?" on Qwen3.5 2B, RTX 4050, 8192-token context. One initial request and one warm request; timings vary and are not averages.
+
+| Stage | Initial request | Warm request |
+|---|---:|---:|
+| STT | 1.722 s | 3.600 s |
+| LLM | 37.494 s | 1.022 s |
+| TTS | 7.373 s | 3.743 s |
+| Total | 46.591 s | 8.365 s |
+
+The initial LLM request included 35.814 seconds of model loading; prompt evaluation took 0.817 seconds. Measurements exclude input audio preparation, microphone capture, and browser playback. Full results: `benchmarks/300-line-prompt.json`.

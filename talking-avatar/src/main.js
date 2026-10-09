@@ -29,13 +29,13 @@ const TTS_SERVER_URL =
  */
 const STT_SERVER_URL =
     import.meta.env.VITE_STT_SERVER_URL ||
-    "http://localhost:8001";
+    "http://localhost:8000";
 
 /**
  * LLM chat endpoint.
  *
  * POST /chat is added to the existing TTS FastAPI server (port 8000).
- * The browser talks to it at TTS_SERVER_URL; we never call llama.cpp directly.
+ * The browser talks to it at TTS_SERVER_URL; we never call Ollama directly.
  */
 const LLM_SERVER_URL =
     import.meta.env.VITE_TTS_SERVER_URL ||
@@ -263,12 +263,13 @@ function appendTranscriptUI(type, text) {
 /**
  * Send transcribed text to the local LLM and display the reply.
  *
- * Calls POST /chat on the TTS server (which proxies to llama.cpp on
- * the Windows host). The browser never touches llama.cpp directly.
+ * Calls POST /chat on the TTS server, which calls Ollama in Docker.
  *
  * @param {string} userText - Transcribed user speech
  * @returns {Promise<void>}
  */
+const conversationSessionId = crypto.randomUUID();
+
 async function sendToLLM(userText) {
     // Show THINKING state
     updatePTTUI("THINKING");
@@ -281,7 +282,7 @@ async function sendToLLM(userText) {
             headers: {
                 "Content-Type": "application/json",
             },
-            body: JSON.stringify({ message: userText }),
+            body: JSON.stringify({ message: userText, session_id: conversationSessionId }),
             signal: AbortSignal.timeout(130_000), // slightly longer than server timeout
         });
 
@@ -297,9 +298,7 @@ async function sendToLLM(userText) {
             if (response.status === 503) {
                 throw new Error(
                     "The local LLM is not running. " +
-                    "Start llama.cpp on the host with: " +
-                    "llama serve --hf-repo Qwen/Qwen3-8B-GGUF " +
-                    "--hf-file qwen3-8b-q4_k_m.gguf --device Vulkan0 --port 8080"
+                    "Start the Ollama Docker service and pull the configured model."
                 );
             } else if (response.status === 504) {
                 throw new Error("The LLM took too long to respond. Please try again.");
@@ -321,6 +320,16 @@ async function sendToLLM(userText) {
         setStatus("Ready");
         updatePTTUI(STTState.IDLE);
         avatarController.setState(AvatarState.IDLE);
+
+        // Speak the generated reply using the same audio/lip-sync path as Speak.
+        setStatus("Generating reply speech...");
+        try {
+            await speakWithKokoro(reply);
+        } catch (speechError) {
+            console.error("Reply speech failed:", speechError);
+            appendTranscriptUI("error", `Speech failed: ${speechError.message}`);
+            setStatus("Reply received, but speech failed.");
+        }
 
     } catch (err) {
         console.error("LLM error:", err);
@@ -357,11 +366,6 @@ const sttManager = new STTManager({
     onTranscript: async (result) => {
         // 1. Show user transcript immediately
         updateTranscriptUI("user", result.text);
-        setStatus("Ready");
-        setTimeout(() => {
-            updatePTTUI(STTState.IDLE);
-            avatarController.setState(AvatarState.IDLE);
-        }, 1200);
         setStatus("Transcribed — sending to LLM...");
 
         // 2. Send to LLM (async — shows THINKING state inside)

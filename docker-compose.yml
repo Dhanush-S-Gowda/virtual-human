@@ -6,44 +6,64 @@ services:
       - "8880:8880"
     restart: unless-stopped
 
-  llm-server:
-    build:
-      context: ./llm-server
-      dockerfile: Dockerfile
-    container_name: virtual-human-llm
+  ollama:
+    image: ollama/ollama:latest
+    container_name: virtual-human-ollama
     ports:
-      - "8002:8000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_KEEP_ALIVE: "10m"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
     restart: unless-stopped
 
   tts-server:
     build:
-      context: ./tts-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: virtual-human-tts
     ports:
       - "8000:8000"
     environment:
       KOKORO_URL: http://kokoro:8880
       LLM_ENABLED: "true"
-      LLM_BASE_URL: http://llm-server:8000
-      LLM_MODEL: qwen3.5:4b
+      LLM_BASE_URL: http://ollama:11434
+      LLM_MODEL: qwen3.5:2b
       LLM_TEMPERATURE: "0.7"
       LLM_MAX_TOKENS: "256"
+      LLM_CONTEXT_LENGTH: "8192"
+      LLM_PROVIDER: ollama
+      TTS_PROVIDER: kokoro
+      STT_PROVIDER: whisper-http
+      STT_BASE_URL: http://stt-server:8001
       LLM_TIMEOUT: "120"
       LLM_HISTORY_TURNS: "8"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      - kokoro
-      - llm-server
+      kokoro:
+        condition: service_started
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
 
   stt-server:
     build:
-      context: ./stt-server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: stt-server/Dockerfile
     container_name: virtual-human-stt
     ports:
       - "8001:8001"
@@ -59,10 +79,13 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_TTS_SERVER_URL: http://localhost:8000
-        VITE_STT_SERVER_URL: http://localhost:8001
+        VITE_STT_SERVER_URL: http://localhost:8000
     container_name: virtual-human-avatar
     ports:
       - "4173:4173"
     depends_on:
       - tts-server
       - stt-server
+
+volumes:
+  ollama-models:

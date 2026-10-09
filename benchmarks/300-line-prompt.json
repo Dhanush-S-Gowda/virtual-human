@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-09",
+  "model": "qwen3.5:2b",
+  "system_prompt_lines": 300,
+  "system_prompt_words": 1669,
+  "context_length": 8192,
+  "input": "Hello, how are you today?",
+  "method": "One initial and one warm backend HTTP pipeline request using synthesized test audio. Excludes microphone capture and browser playback. Input audio preparation excluded. Replies vary with sampling.",
+  "results": [
+    {
+      "trial": "first_300_line_prompt",
+      "stt_seconds": 1.722,
+      "llm_seconds": 37.494,
+      "tts_seconds": 7.373,
+      "total_seconds": 46.591,
+      "ollama_load_seconds": 35.81411,
+      "ollama_prompt_seconds": 0.81653,
+      "ollama_generation_seconds": 0.55459
+    },
+    {
+      "trial": "warm_300_line_prompt",
+      "stt_seconds": 3.6,
+      "llm_seconds": 1.022,
+      "tts_seconds": 3.743,
+      "total_seconds": 8.365
+    }
+  ]
+}

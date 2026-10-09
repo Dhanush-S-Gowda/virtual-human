@@ -11,7 +11,7 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api\/tts/, ""),
       },
       "/api/stt": {
-        target: "http://localhost:8001",
+        target: "http://localhost:8000",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/stt/, ""),
       },

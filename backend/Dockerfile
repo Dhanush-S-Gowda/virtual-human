@@ -1,4 +1,3 @@
-# Compatibility Dockerfile: build with repository root as context.
 FROM python:3.12-slim
 WORKDIR /app
 ENV PIP_DEFAULT_TIMEOUT=120 \
