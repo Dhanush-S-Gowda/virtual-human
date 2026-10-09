@@ -1,4 +1,7 @@
 import { TalkingHead } from "./talkinghead/talkinghead.mjs";
+import { STTManager, STTState } from "./stt/STTManager.js";
+import { KeyboardPushToTalk } from "./stt/keyboardPushToTalk.js";
+import { avatarController, AvatarState } from "./avatar/AvatarController.js";
 
 /**
  * --------------------------------------------------------------------------
@@ -9,16 +12,34 @@ import { TalkingHead } from "./talkinghead/talkinghead.mjs";
 /**
  * Local FastAPI adapter.
  *
- * Your Vite frontend:
- *   http://localhost:5173
+ * For local development the default is:
+ *   http://localhost:8000
  *
- * Your FastAPI backend:
- *   http://127.0.0.1:8000
- *
- * Change this if your backend is running on another port.
+ * In Docker, set VITE_TTS_SERVER_URL to the mapped host URL.
  */
 const TTS_SERVER_URL =
-    "http://127.0.0.1:8000";
+    import.meta.env.VITE_TTS_SERVER_URL ||
+    "http://localhost:8000";
+
+/**
+ * Local faster-whisper STT service.
+ *
+ * Default is:
+ *   http://localhost:8001
+ */
+const STT_SERVER_URL =
+    import.meta.env.VITE_STT_SERVER_URL ||
+    "http://localhost:8001";
+
+/**
+ * LLM chat endpoint.
+ *
+ * POST /chat is added to the existing TTS FastAPI server (port 8000).
+ * The browser talks to it at TTS_SERVER_URL; we never call llama.cpp directly.
+ */
+const LLM_SERVER_URL =
+    import.meta.env.VITE_TTS_SERVER_URL ||
+    "http://localhost:8000";
 
 /**
  * Kokoro voice.
@@ -103,6 +124,296 @@ const neutralButton =
 
 const stopButton =
     document.getElementById("stopButton");
+
+const transcriptBody =
+    document.getElementById("transcriptBody");
+
+const pttBanner =
+    document.getElementById("pttBanner");
+
+const pttIcon =
+    document.getElementById("pttIcon");
+
+const pttText =
+    document.getElementById("pttText");
+
+
+/**
+ * --------------------------------------------------------------------------
+ * STT & Push-to-Talk Setup
+ * --------------------------------------------------------------------------
+ */
+
+/**
+ * Update Push-to-Talk visual feedback banner.
+ *
+ * @param {string} state
+ * @param {string} [message]
+ */
+function updatePTTUI(state, message = "") {
+    if (!pttBanner || !pttText || !pttIcon) {
+        return;
+    }
+
+    pttBanner.className = "";
+
+    switch (state) {
+        case STTState.LISTENING:
+            pttBanner.classList.add("ptt-listening");
+            pttIcon.textContent = "🔴";
+            pttText.textContent = "LISTENING... Release SPACE when finished";
+            break;
+
+        case STTState.TRANSCRIBING:
+            pttBanner.classList.add("ptt-transcribing");
+            pttIcon.textContent = "⏳";
+            pttText.textContent = "TRANSCRIBING...";
+            break;
+
+        case "THINKING":
+            pttBanner.classList.add("ptt-thinking");
+            pttIcon.textContent = "🧠";
+            pttText.textContent = "Thinking...";
+            break;
+
+        case STTState.ERROR:
+            pttBanner.classList.add("ptt-error");
+            pttIcon.textContent = "⚠️";
+            pttText.textContent = message || "Speech recognition error";
+            break;
+
+        case STTState.READY:
+        case STTState.IDLE:
+        default:
+            pttBanner.classList.add("ptt-idle");
+            pttIcon.textContent = "🎤";
+            pttText.textContent = "Hold SPACE to speak";
+            break;
+    }
+}
+
+/**
+ * Update transcript box display.
+ *
+ * @param {"user"|"error"|"info"} type
+ * @param {"user"|"avatar"|"thinking"|"error"|"info"} type
+ * @param {string} text
+ */
+function updateTranscriptUI(type, text) {
+    if (!transcriptBody) {
+        return;
+    }
+
+    if (type === "user") {
+        transcriptBody.innerHTML = `
+            <div class="transcript-user">You said:</div>
+            <div class="transcript-text">"${text}"</div>
+        `;
+    } else if (type === "avatar") {
+        transcriptBody.innerHTML = `
+            <div class="transcript-avatar">Avatar:</div>
+            <div class="transcript-reply">${text}</div>
+        `;
+    } else if (type === "thinking") {
+        transcriptBody.innerHTML = `
+            <div class="transcript-thinking">🧠 Thinking...</div>
+        `;
+    } else if (type === "error") {
+        transcriptBody.innerHTML = `
+            <div class="transcript-error">${text}</div>
+        `;
+    } else if (type === "info") {
+        transcriptBody.innerHTML = `
+            <span style="color: #9ca3af;">${text}</span>
+        `;
+    }
+}
+
+/**
+ * Append to transcript without clearing the existing content.
+ * Used to show the avatar reply below the user transcript.
+ *
+ * @param {"avatar"|"thinking"|"error"} type
+ * @param {string} text
+ */
+function appendTranscriptUI(type, text) {
+    if (!transcriptBody) {
+        return;
+    }
+
+    const el = document.createElement("div");
+
+    if (type === "avatar") {
+        el.innerHTML = `
+            <div class="transcript-avatar">Avatar:</div>
+            <div class="transcript-reply">${text}</div>
+        `;
+    } else if (type === "thinking") {
+        el.className = "transcript-thinking";
+        el.textContent = "🧠 Thinking...";
+    } else if (type === "error") {
+        el.className = "transcript-error";
+        el.textContent = text;
+    }
+
+    transcriptBody.appendChild(el);
+    el.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+/**
+ * Send transcribed text to the local LLM and display the reply.
+ *
+ * Calls POST /chat on the TTS server (which proxies to llama.cpp on
+ * the Windows host). The browser never touches llama.cpp directly.
+ *
+ * @param {string} userText - Transcribed user speech
+ * @returns {Promise<void>}
+ */
+async function sendToLLM(userText) {
+    // Show THINKING state
+    updatePTTUI("THINKING");
+    appendTranscriptUI("thinking", "");
+    setStatus("Thinking...");
+
+    try {
+        const response = await fetch(`${LLM_SERVER_URL}/chat`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ message: userText }),
+            signal: AbortSignal.timeout(130_000), // slightly longer than server timeout
+        });
+
+        if (!response.ok) {
+            let detail = "LLM error";
+            try {
+                const errData = await response.json();
+                detail = errData.detail || detail;
+            } catch (_) {
+                // ignore JSON parse failure
+            }
+
+            if (response.status === 503) {
+                throw new Error(
+                    "The local LLM is not running. " +
+                    "Start llama.cpp on the host with: " +
+                    "llama serve --hf-repo Qwen/Qwen3-8B-GGUF " +
+                    "--hf-file qwen3-8b-q4_k_m.gguf --device Vulkan0 --port 8080"
+                );
+            } else if (response.status === 504) {
+                throw new Error("The LLM took too long to respond. Please try again.");
+            } else {
+                throw new Error(detail);
+            }
+        }
+
+        const data = await response.json();
+        const reply = (data.reply || "").trim();
+
+        if (!reply) {
+            throw new Error("The LLM returned an empty reply.");
+        }
+
+        // Replace "Thinking..." with the actual reply
+        updateTranscriptUI("user", userText);
+        appendTranscriptUI("avatar", reply);
+        setStatus("Ready");
+        updatePTTUI(STTState.IDLE);
+        avatarController.setState(AvatarState.IDLE);
+
+    } catch (err) {
+        console.error("LLM error:", err);
+
+        let userMsg = err.message;
+        if (err.name === "TimeoutError" || err.name === "AbortError") {
+            userMsg = "LLM request timed out. Please try again.";
+        } else if (err.name === "TypeError" && err.message.includes("fetch")) {
+            userMsg = "Cannot reach the LLM server. Is it running?";
+        }
+
+        // Show error in transcript (keep user speech visible)
+        updateTranscriptUI("user", userText);
+        appendTranscriptUI("error", `⚠️ ${userMsg}`);
+        setStatus("LLM unavailable");
+        updatePTTUI(STTState.ERROR, userMsg);
+        avatarController.setState(AvatarState.IDLE);
+
+        setTimeout(() => {
+            updatePTTUI(STTState.IDLE);
+            setStatus("Ready");
+        }, 5000);
+    }
+}
+
+/**
+ * STT Manager instance.
+ */
+const sttManager = new STTManager({
+    endpoint: STT_SERVER_URL,
+    onStateChange: (state, detail) => {
+        updatePTTUI(state, detail);
+    },
+    onTranscript: async (result) => {
+        // 1. Show user transcript immediately
+        updateTranscriptUI("user", result.text);
+        setStatus("Ready");
+        setTimeout(() => {
+            updatePTTUI(STTState.IDLE);
+            avatarController.setState(AvatarState.IDLE);
+        }, 1200);
+        setStatus("Transcribed — sending to LLM...");
+
+        // 2. Send to LLM (async — shows THINKING state inside)
+        await sendToLLM(result.text);
+    },
+    onError: (errorMsg) => {
+        updateTranscriptUI("error", errorMsg);
+        setStatus(errorMsg);
+        updatePTTUI(STTState.ERROR, errorMsg);
+        avatarController.setState(AvatarState.IDLE);
+        setTimeout(() => {
+            updatePTTUI(STTState.IDLE);
+        }, 3000);
+    },
+});
+
+/**
+ * Push-to-Talk keyboard controller (Spacebar).
+ */
+const pushToTalk = new KeyboardPushToTalk({
+    key: "Space",
+    onStart: async () => {
+        if (isSpeaking) {
+            stopEverything();
+        }
+        avatarController.setState(AvatarState.LISTENING);
+        setStatus("Listening...");
+        const started = await sttManager.startRecording();
+        if (!started) {
+            avatarController.setState(AvatarState.IDLE);
+        }
+    },
+    onStop: async () => {
+        setStatus("Transcribing...");
+        const audioBlob = await sttManager.stopRecording();
+        if (audioBlob) {
+            await sttManager.transcribe(audioBlob);
+        } else {
+            const msg = "No speech detected. Please try again.";
+            updateTranscriptUI("error", msg);
+            updatePTTUI(STTState.IDLE);
+            avatarController.setState(AvatarState.IDLE);
+            setStatus("Ready");
+        }
+    },
+    onCancel: () => {
+        sttManager.cancelRecording();
+        updatePTTUI(STTState.IDLE);
+        avatarController.setState(AvatarState.IDLE);
+        setStatus("Ready");
+    },
+});
 
 
 /**
@@ -324,7 +635,7 @@ async function speakWithKokoro(text) {
     }
 
     const response = await fetch(
-        "http://127.0.0.1:8000/synthesize",
+        `${TTS_SERVER_URL}/synthesize`,
         {
             method: "POST",
 
@@ -614,6 +925,8 @@ async function initializeAvatar() {
                 }
             );
 
+        await head.lipsyncGetProcessor("en");
+
 
         /**
          * ------------------------------------------------------------------
@@ -683,6 +996,8 @@ async function initializeAvatar() {
 
         head.start();
 
+        avatarController.setHead(head);
+        avatarController.setState(AvatarState.IDLE);
 
         hideLoading();
 
@@ -923,6 +1238,12 @@ function stopEverything() {
          */
         stopSpeech();
 
+        /*
+         * Stop any active speech-to-text recording.
+         */
+        sttManager.cancelRecording();
+        updatePTTUI(STTState.IDLE);
+        avatarController.setState(AvatarState.IDLE);
 
         /*
          * Stop avatar actions.
@@ -1100,6 +1421,8 @@ async function bootstrap() {
     try {
 
         registerEventHandlers();
+
+        pushToTalk.attach();
 
         await initializeAvatar();
 

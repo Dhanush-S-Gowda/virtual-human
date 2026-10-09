@@ -94,6 +94,180 @@
         }
 
         /*
+         * Transcript display box.
+         */
+        #transcriptContainer {
+            position: absolute;
+
+            top: 20px;
+            right: 20px;
+
+            width: 340px;
+            max-width: calc(100% - 40px);
+
+            z-index: 10;
+
+            padding: 14px 16px;
+
+            border-radius: 12px;
+
+            background: rgba(0, 0, 0, 0.75);
+
+            backdrop-filter: blur(10px);
+
+            border: 1px solid rgba(255, 255, 255, 0.12);
+
+            color: white;
+
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+            transition: all 0.2s ease;
+        }
+
+        #transcriptHeader {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #9ca3af;
+
+            margin-bottom: 8px;
+        }
+
+        #transcriptBody {
+            font-size: 14px;
+            line-height: 1.45;
+            color: #f3f4f6;
+            word-break: break-word;
+        }
+
+        .transcript-user {
+            color: #60a5fa;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+
+        .transcript-text {
+            color: #f9fafb;
+            font-style: italic;
+        }
+
+        .transcript-error {
+            color: #f87171;
+        }
+
+        /*
+         * Push-to-talk visual indicator banner.
+         */
+        #pttBanner {
+            position: absolute;
+
+            bottom: 84px;
+            left: 50%;
+            transform: translateX(-50%);
+
+            z-index: 10;
+
+            display: flex;
+            align-items: center;
+            gap: 10px;
+
+            padding: 10px 22px;
+
+            border-radius: 30px;
+
+            background: rgba(0, 0, 0, 0.75);
+
+            backdrop-filter: blur(10px);
+
+            border: 1px solid rgba(255, 255, 255, 0.15);
+
+            color: white;
+
+            font-size: 14px;
+            font-weight: 500;
+
+            pointer-events: none;
+
+            user-select: none;
+
+            transition: all 0.2s ease;
+        }
+
+        #pttBanner.ptt-idle {
+            background: rgba(0, 0, 0, 0.75);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        @keyframes ptt-pulse {
+            0% {
+                transform: translateX(-50%) scale(1);
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+            }
+            70% {
+                transform: translateX(-50%) scale(1.03);
+                box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+            }
+            100% {
+                transform: translateX(-50%) scale(1);
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+            }
+        }
+
+        #pttBanner.ptt-listening {
+            background: rgba(220, 38, 38, 0.9);
+            border-color: #ef4444;
+            animation: ptt-pulse 1.4s infinite;
+        }
+
+        #pttBanner.ptt-transcribing {
+            background: rgba(217, 119, 6, 0.9);
+            border-color: #f59e0b;
+        }
+
+        #pttBanner.ptt-error {
+            background: rgba(185, 28, 28, 0.9);
+            border-color: #ef4444;
+        }
+
+        @keyframes ptt-thinking {
+            0%, 100% {
+                transform: translateX(-50%) scale(1);
+                box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7);
+            }
+            50% {
+                transform: translateX(-50%) scale(1.02);
+                box-shadow: 0 0 0 10px rgba(139, 92, 246, 0);
+            }
+        }
+
+        #pttBanner.ptt-thinking {
+            background: rgba(109, 40, 217, 0.9);
+            border-color: #8b5cf6;
+            animation: ptt-thinking 1.6s infinite;
+        }
+
+        /* Avatar reply in transcript */
+        .transcript-avatar {
+            color: #34d399;
+            font-weight: 600;
+            margin-bottom: 2px;
+            margin-top: 10px;
+        }
+
+        .transcript-reply {
+            color: #ecfdf5;
+        }
+
+        .transcript-thinking {
+            color: #a78bfa;
+            font-style: italic;
+        }
+
+        /*
          * Bottom control panel.
          */
         #controls {
@@ -187,9 +361,19 @@
                 bottom: 10px;
             }
 
+            #pttBanner {
+                bottom: 140px;
+            }
+
             #status {
                 top: 10px;
                 left: 10px;
+            }
+
+            #transcriptContainer {
+                top: 60px;
+                right: 10px;
+                width: calc(100% - 20px);
             }
         }
     </style>
@@ -210,6 +394,23 @@
     <!-- Loading -->
     <div id="loading">
         Loading avatar...
+    </div>
+
+    <!-- Transcript Area -->
+    <div id="transcriptContainer">
+        <div id="transcriptHeader">
+            <span>Conversation</span>
+            <span id="sttBadge">STT: faster-whisper</span>
+        </div>
+        <div id="transcriptBody">
+            <span style="color: #9ca3af;">Hold SPACE to speak to the avatar...</span>
+        </div>
+    </div>
+
+    <!-- Push-to-Talk visual feedback banner -->
+    <div id="pttBanner" class="ptt-idle">
+        <span id="pttIcon">🎤</span>
+        <span id="pttText">Hold SPACE to speak</span>
     </div>
 
     <!-- Controls -->

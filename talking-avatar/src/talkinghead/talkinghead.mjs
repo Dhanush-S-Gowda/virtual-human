@@ -33,6 +33,7 @@ import Stats from 'three/addons/libs/stats.module.js';
 
 import { retarget } from './retargeter.mjs';
 import{ DynamicBones } from './dynamicbones.mjs';
+import { LipsyncEn } from './lipsync-en.mjs';
 const workletUrl = new URL('./playback-worklet.js', import.meta.url);
 
 // Temporary objects for animation loop
@@ -2813,12 +2814,19 @@ class TalkingHead {
   */
   lipsyncGetProcessor(lang, path="./") {
     if ( !this.lipsync.hasOwnProperty(lang) ) {
+      if ( lang.toLowerCase() === 'en' ) {
+        this.lipsync[lang] = new LipsyncEn;
+        return Promise.resolve();
+      }
+
       const moduleName = path + 'lipsync-' + lang.toLowerCase() + '.mjs';
       const className = 'Lipsync' + lang.charAt(0).toUpperCase() + lang.slice(1);
-      import(moduleName).then( module => {
+      return import(moduleName).then( module => {
         this.lipsync[lang] = new module[className];
       });
     }
+
+    return Promise.resolve();
   }
 
   /**

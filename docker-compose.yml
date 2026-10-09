@@ -1,0 +1,68 @@
+services:
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro
+    ports:
+      - "8880:8880"
+    restart: unless-stopped
+
+  llm-server:
+    build:
+      context: ./llm-server
+      dockerfile: Dockerfile
+    container_name: virtual-human-llm
+    ports:
+      - "8002:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  tts-server:
+    build:
+      context: ./tts-server
+      dockerfile: Dockerfile
+    container_name: virtual-human-tts
+    ports:
+      - "8000:8000"
+    environment:
+      KOKORO_URL: http://kokoro:8880
+      LLM_ENABLED: "true"
+      LLM_BASE_URL: http://llm-server:8000
+      LLM_MODEL: qwen3.5:4b
+      LLM_TEMPERATURE: "0.7"
+      LLM_MAX_TOKENS: "256"
+      LLM_TIMEOUT: "120"
+      LLM_HISTORY_TURNS: "8"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - kokoro
+      - llm-server
+    restart: unless-stopped
+
+  stt-server:
+    build:
+      context: ./stt-server
+      dockerfile: Dockerfile
+    container_name: virtual-human-stt
+    ports:
+      - "8001:8001"
+    environment:
+      WHISPER_MODEL: base
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: int8
+    restart: unless-stopped
+
+  talking-avatar:
+    build:
+      context: ./talking-avatar
+      dockerfile: Dockerfile
+      args:
+        VITE_TTS_SERVER_URL: http://localhost:8000
+        VITE_STT_SERVER_URL: http://localhost:8001
+    container_name: virtual-human-avatar
+    ports:
+      - "4173:4173"
+    depends_on:
+      - tts-server
+      - stt-server
