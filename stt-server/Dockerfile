@@ -15,11 +15,7 @@ RUN apt-get update && \
 COPY stt-server/requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the Whisper model at build time so it is cached in the image
-# and the container starts instantly.
-RUN python -c "\
-from faster_whisper import WhisperModel; \
-WhisperModel('base', device='cpu', compute_type='int8')"
+# The configured model downloads at startup into the persistent Compose volume.
 
 COPY backend/stt/whisper_engine.py ./main.py
 

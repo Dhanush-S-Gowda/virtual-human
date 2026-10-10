@@ -4,6 +4,12 @@ services:
     container_name: kokoro
     ports:
       - "8880:8880"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8880/health', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      start_period: 120s
+      retries: 60
     restart: unless-stopped
 
   ollama:
@@ -14,7 +20,7 @@ services:
     volumes:
       - ollama-models:/root/.ollama
     environment:
-      OLLAMA_CONTEXT_LENGTH: "4096"
+      OLLAMA_CONTEXT_LENGTH: "8192"
       OLLAMA_KEEP_ALIVE: "10m"
     deploy:
       resources:
@@ -29,6 +35,26 @@ services:
       timeout: 5s
       retries: 30
     restart: unless-stopped
+
+  ollama-init:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if ! ollama show qwen3.5:2b >/dev/null 2>&1; then
+          echo "Downloading qwen3.5:2b..."
+          ollama pull qwen3.5:2b
+        fi
+        echo "Warming up qwen3.5:2b..."
+        ollama run --think=false --keepalive=10m qwen3.5:2b "Reply with READY only."
+        echo "Ollama model is ready."
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
 
   tts-server:
     build:
@@ -55,9 +81,17 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       kokoro:
-        condition: service_started
-      ollama:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+      stt-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      start_period: 30s
+      retries: 30
     restart: unless-stopped
 
   stt-server:
@@ -71,6 +105,14 @@ services:
       WHISPER_MODEL: base
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: int8
+    volumes:
+      - whisper-models:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 5s
+      timeout: 10s
+      start_period: 300s
+      retries: 60
     restart: unless-stopped
 
   talking-avatar:
@@ -84,8 +126,16 @@ services:
     ports:
       - "4173:4173"
     depends_on:
-      - tts-server
-      - stt-server
+      tts-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4173').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 10s
+      start_period: 20s
+      retries: 30
+    restart: unless-stopped
 
 volumes:
   ollama-models:
+  whisper-models:

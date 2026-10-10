@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import io
 import os
 import shutil
 import tempfile
+import wave
 from time import perf_counter
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -11,6 +13,7 @@ from typing import Optional
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
+from faster_whisper.audio import decode_audio
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -34,6 +37,15 @@ whisper_model: Optional[WhisperModel] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global whisper_model
+    # Catch incompatible decoder dependencies before reporting readiness.
+    with io.BytesIO() as audio:
+        with wave.open(audio, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b"\x00\x00" * 1600)
+        audio.seek(0)
+        decode_audio(audio)
     logger.info(
         "Loading faster-whisper model '%s' on device '%s' with compute type '%s'...",
         WHISPER_MODEL,

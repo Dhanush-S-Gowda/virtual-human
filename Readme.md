@@ -7,15 +7,33 @@ Local talking avatar with an HTTP backend, Ollama Qwen3.5 2B, Kokoro speech synt
 Start Docker Desktop with NVIDIA GPU support, then run:
 
 ```powershell
-.\Start-VirtualHuman.ps1 -Rebuild
+docker compose up
 ```
 
-The launcher starts Ollama, pulls `qwen3.5:2b` into a persistent volume, and starts the services. Open http://localhost:4173. Hold Space to speak; release it to transcribe, generate a reply, and speak that reply with lip synchronization.
+Compose builds missing images, starts Ollama, automatically pulls `qwen3.5:2b` if absent, and warms the model before starting the API. Whisper downloads its configured model on first startup. Both model caches persist in Docker volumes. Health checks hold back the API until the providers are ready, then start the avatar. First startup requires internet access and time to download images and models.
+
+Open http://localhost:4173 after startup completes. Hold Space to speak; release it to transcribe, generate a reply, and speak that reply with lip synchronization.
+
+For background startup that waits until all services are ready:
 
 ```powershell
-.\Start-VirtualHuman.ps1 -Stop
-docker compose logs -f tts-server stt-server
+docker compose up -d --wait --wait-timeout 900
 ```
+
+After changing source code, rebuild:
+
+```powershell
+docker compose up -d --build --wait --wait-timeout 900
+```
+
+The `ollama-init` service exits successfully after initialization; that is expected. If a download fails, fix the connection and rerun `docker compose up`. Existing model files are reused. Models stay warm for ten minutes after use; a later request can still incur loading time after idle eviction or a restart.
+
+```powershell
+docker compose down
+docker compose logs -f ollama-init tts-server stt-server
+```
+
+`Start-VirtualHuman.ps1` remains a convenience wrapper around the same Compose startup; no separate launch script or manual model pull is required.
 
 ## Modular backend
 

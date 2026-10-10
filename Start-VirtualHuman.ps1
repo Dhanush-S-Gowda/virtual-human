@@ -8,14 +8,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Could not stop Docker services." }
         exit 0
     }
-    docker compose up -d --wait ollama
-    if ($LASTEXITCODE -ne 0) { throw "Ollama failed to start. Check Docker Desktop GPU support." }
-    docker compose exec -T ollama ollama pull qwen3.5:2b
-    if ($LASTEXITCODE -ne 0) { throw "Model download failed. Run this script again to resume." }
     if ($Rebuild) {
-        docker compose up -d --build
+        docker compose up -d --build --wait --wait-timeout 900
     } else {
-        docker compose up -d
+        docker compose up -d --wait --wait-timeout 900
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not start the Virtual Human stack." }
     Write-Host "Virtual Human ready: http://localhost:4173 (Ollama qwen3.5:2b)"
