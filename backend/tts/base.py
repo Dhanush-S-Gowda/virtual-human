@@ -1,5 +1,11 @@
 from typing import Protocol
-from backend.schemas import SynthesizeRequest, SynthesizeResponse
+
+from schemas import SynthesizeResponse
+
 
 class TTSProvider(Protocol):
-    async def synthesize(self, request: SynthesizeRequest) -> SynthesizeResponse: ...
+    async def initialize(self) -> None: ...
+
+    async def synthesize_segment(
+        self, text: str, voice: str, speed: float
+    ) -> SynthesizeResponse: ...

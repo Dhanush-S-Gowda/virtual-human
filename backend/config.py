@@ -1,24 +1,33 @@
-import os
-from dataclasses import dataclass
+"""Load backend settings from config.yaml."""
+
 from pathlib import Path
+from types import SimpleNamespace
 
-DEFAULT_PROMPT = Path(__file__).parent / "llm" / "prompts" / "system.txt"
+import yaml
 
-@dataclass(frozen=True)
-class Settings:
-    llm_provider: str = os.getenv("LLM_PROVIDER", "ollama")
-    tts_provider: str = os.getenv("TTS_PROVIDER", "kokoro")
-    stt_provider: str = os.getenv("STT_PROVIDER", "whisper-http")
-    llm_url: str = os.getenv("LLM_BASE_URL", "http://ollama:11434")
-    llm_model: str = os.getenv("LLM_MODEL", "qwen3.5:2b")
-    kokoro_url: str = os.getenv("KOKORO_URL", "http://kokoro:8880")
-    stt_url: str = os.getenv("STT_BASE_URL", "http://stt-server:8001")
-    enabled: bool = os.getenv("LLM_ENABLED", "true").lower() == "true"
-    timeout: float = float(os.getenv("LLM_TIMEOUT", "120"))
-    temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "256"))
-    context_length: int = int(os.getenv("LLM_CONTEXT_LENGTH", "8192"))
-    history_turns: int = int(os.getenv("LLM_HISTORY_TURNS", "8"))
-    system_prompt: str = os.getenv("LLM_SYSTEM_PROMPT") or Path(os.getenv("LLM_SYSTEM_PROMPT_FILE", str(DEFAULT_PROMPT))).read_text(encoding="utf-8").strip()
+CONFIG_FILE = Path(__file__).with_name("config.yaml")
 
-settings = Settings()
+with CONFIG_FILE.open(encoding="utf-8") as config_file:
+    config = yaml.safe_load(config_file)
+
+DEFAULTS = {
+    "faster_whisper_model": "base",
+    "faster_whisper_device": "cpu",
+    "faster_whisper_compute_type": "int8",
+    "faster_whisper_download_root": ".cache/faster-whisper",
+    "max_speech_segment_words": 10,
+    "tts_device": "auto",
+    "tts_max_concurrent_segments": 2,
+    "tts_language": "en",
+    "tts_supertonic_steps": 8,
+    "tts_supertonic_voice_style": "supertonic/assets/voice_styles/F1.json",
+}
+config = {**DEFAULTS, **(config or {})}
+
+config["system_prompt"] = (
+    (CONFIG_FILE.parent / config.pop("system_prompt_file", "llm/prompts/system.txt"))
+    .read_text(encoding="utf-8")
+    .strip()
+)
+
+settings = SimpleNamespace(**config)

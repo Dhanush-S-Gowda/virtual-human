@@ -1,28 +1,28 @@
-from typing import Any
 import logging
+from typing import Any
+
 import httpx
 from fastapi import HTTPException
-from backend.schemas import SynthesizeRequest, SynthesizeResponse
-from backend.config import settings
+
+from config import settings
+from schemas import SynthesizeResponse
+
 logger = logging.getLogger(__name__)
-KOKORO_URL = settings.kokoro_url
 KOKORO_TIMEOUT_SECONDS = settings.timeout
+
 
 def validate_timestamps(
     timestamps: Any,
 ) -> tuple[list[str], list[float], list[float]]:
 
     if not isinstance(timestamps, list):
-        raise ValueError(
-            "Kokoro did not return timestamp data."
-        )
+        raise ValueError("Kokoro did not return timestamp data.")
 
     words: list[str] = []
     times: list[float] = []
     durations: list[float] = []
 
     for item in timestamps:
-
         if not isinstance(item, dict):
             continue
 
@@ -32,10 +32,7 @@ def validate_timestamps(
 
         end = item.get("end_time")
 
-        if (
-            not isinstance(word, str)
-            or not word.strip()
-        ):
+        if not isinstance(word, str) or not word.strip():
             continue
 
         if not isinstance(start, (int, float)):
@@ -60,9 +57,7 @@ def validate_timestamps(
         durations.append(duration_ms)
 
     if not words:
-        raise ValueError(
-            "No usable word timestamps were returned."
-        )
+        raise ValueError("No usable word timestamps were returned.")
 
     return (
         words,
@@ -71,11 +66,8 @@ def validate_timestamps(
     )
 
 
-async def synthesize(
-    request: SynthesizeRequest,
-) -> SynthesizeResponse:
-
-    text = request.text.strip()
+async def synthesize_segment(text: str, voice: str, speed: float) -> SynthesizeResponse:
+    text = text.strip()
 
     if not text:
         raise HTTPException(
@@ -85,22 +77,14 @@ async def synthesize(
 
     payload = {
         "model": "kokoro",
-
         "input": text,
-
-        "voice": request.voice,
-
-        "speed": request.speed,
-
+        "voice": voice,
+        "speed": speed,
         "response_format": "wav",
-
         "stream": False,
     }
 
-    endpoint = (
-        f"{KOKORO_URL}"
-        "/dev/captioned_speech"
-    )
+    endpoint = f"{settings.tts_url}/dev/captioned_speech"
 
     logger.info(
         "Synthesizing text: %s",
@@ -108,11 +92,9 @@ async def synthesize(
     )
 
     try:
-
         async with httpx.AsyncClient(
             timeout=KOKORO_TIMEOUT_SECONDS,
         ) as client:
-
             response = await client.post(
                 endpoint,
                 json=payload,
@@ -121,10 +103,7 @@ async def synthesize(
             response.raise_for_status()
 
     except httpx.TimeoutException as exc:
-
-        logger.exception(
-            "Kokoro request timed out."
-        )
+        logger.exception("Kokoro request timed out.")
 
         raise HTTPException(
             status_code=504,
@@ -132,52 +111,34 @@ async def synthesize(
         ) from exc
 
     except httpx.HTTPStatusError as exc:
-
-        logger.exception(
-            "Kokoro returned HTTP error."
-        )
+        logger.exception("Kokoro returned HTTP error.")
 
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Kokoro returned an error: "
-                f"{exc.response.status_code}"
-            ),
+            detail=(f"Kokoro returned an error: {exc.response.status_code}"),
         ) from exc
 
     except httpx.HTTPError as exc:
-
-        logger.exception(
-            "Failed to communicate with Kokoro."
-        )
+        logger.exception("Failed to communicate with Kokoro.")
 
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Unable to communicate with Kokoro."
-            ),
+            detail=("Unable to communicate with Kokoro."),
         ) from exc
 
     try:
-
         data = response.json()
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Kokoro returned invalid JSON."
-            ),
+            detail=("Kokoro returned invalid JSON."),
         ) from exc
 
     if not isinstance(data, dict):
-
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Unexpected Kokoro response."
-            ),
+            detail=("Unexpected Kokoro response."),
         )
 
     encoded_audio = data.get("audio")
@@ -186,30 +147,21 @@ async def synthesize(
         encoded_audio,
         str,
     ):
-
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Kokoro response does not contain audio."
-            ),
+            detail=("Kokoro response does not contain audio."),
         )
 
-    timestamps = data.get(
-        "timestamps"
-    )
+    timestamps = data.get("timestamps")
 
     try:
-
         (
             words,
             wtimes,
             wdurations,
-        ) = validate_timestamps(
-            timestamps
-        )
+        ) = validate_timestamps(timestamps)
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=502,
             detail=str(exc),
@@ -217,20 +169,20 @@ async def synthesize(
 
     return SynthesizeResponse(
         audio_base64=encoded_audio,
-
         audio_encoding="wav",
-
         words=words,
-
         wtimes=wtimes,
-
         wdurations=wdurations,
-
-        sample_rate=24000,
+        sample_rate=settings.tts_sample_rate,
     )
 
 
-
 class KokoroProvider:
-    async def synthesize(self, request: SynthesizeRequest) -> SynthesizeResponse:
-        return await synthesize(request)
+    async def initialize(self) -> None:
+        """The remote Kokoro service owns its model loading lifecycle."""
+        return None
+
+    async def synthesize_segment(
+        self, text: str, voice: str, speed: float
+    ) -> SynthesizeResponse:
+        return await synthesize_segment(text, voice, speed)

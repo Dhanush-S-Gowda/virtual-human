@@ -1,4 +1,4 @@
-# Start the Docker-based Virtual Human stack with Ollama Qwen3.5 2B.
+# Start the Docker-based Virtual Human stack.
 param([switch]$Stop, [switch]$Rebuild)
 $ErrorActionPreference = "Stop"
 Push-Location $PSScriptRoot
@@ -14,8 +14,8 @@ try {
         docker compose up -d --wait --wait-timeout 900
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not start the Virtual Human stack." }
-    Write-Host "Virtual Human ready: http://localhost:4173 (Ollama qwen3.5:2b)"
-    Write-Host "Latency logs: docker compose logs -f stt-server tts-server"
+    Write-Host "Virtual Human ready: http://localhost:4173"
+    Write-Host "Backend logs: docker compose logs -f backend"
 } finally {
     Pop-Location
 }

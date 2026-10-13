@@ -9,54 +9,10 @@ import { avatarController, AvatarState } from "./avatar/AvatarController.js";
  * --------------------------------------------------------------------------
  */
 
-/**
- * Local FastAPI adapter.
- *
- * For local development the default is:
- *   http://localhost:8000
- *
- * In Docker, set VITE_TTS_SERVER_URL to the mapped host URL.
- */
-const TTS_SERVER_URL =
-    import.meta.env.VITE_TTS_SERVER_URL ||
+/** Conversation backend base URL. */
+const BACKEND_URL =
+    import.meta.env.VITE_BACKEND_URL ||
     "http://localhost:8000";
-
-/**
- * Local faster-whisper STT service.
- *
- * Default is:
- *   http://localhost:8001
- */
-const STT_SERVER_URL =
-    import.meta.env.VITE_STT_SERVER_URL ||
-    "http://localhost:8000";
-
-/**
- * LLM chat endpoint.
- *
- * POST /chat is added to the existing TTS FastAPI server (port 8000).
- * The browser talks to it at TTS_SERVER_URL; we never call Ollama directly.
- */
-const LLM_SERVER_URL =
-    import.meta.env.VITE_TTS_SERVER_URL ||
-    "http://localhost:8000";
-
-/**
- * Kokoro voice.
- *
- * af_bella is an English female voice.
- *
- * Other Kokoro voices can be used if your backend/model
- * supports them.
- */
-const KOKORO_VOICE =
-    "af_bella";
-
-/**
- * Speech speed.
- */
-const KOKORO_SPEED = 1.0;
-
 
 /**
  * --------------------------------------------------------------------------
@@ -72,7 +28,10 @@ let head = null;
 /**
  * Prevent multiple TTS requests from playing simultaneously.
  */
-let speechRequestController = null;
+let speechSocket = null;
+
+/** Serialize decode and enqueue work so streamed segments stay in order. */
+let speechPlaybackQueue = Promise.resolve();
 
 /**
  * Tracks whether the avatar is currently speaking.
@@ -261,115 +220,40 @@ function appendTranscriptUI(type, text) {
 }
 
 /**
- * Send transcribed text to the local LLM and display the reply.
- *
- * Calls POST /chat on the TTS server, which calls Ollama in Docker.
- *
- * @param {string} userText - Transcribed user speech
- * @returns {Promise<void>}
- */
-const conversationSessionId = crypto.randomUUID();
-
-async function sendToLLM(userText) {
-    // Show THINKING state
-    updatePTTUI("THINKING");
-    appendTranscriptUI("thinking", "");
-    setStatus("Thinking...");
-
-    try {
-        const response = await fetch(`${LLM_SERVER_URL}/chat`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ message: userText, session_id: conversationSessionId }),
-            signal: AbortSignal.timeout(130_000), // slightly longer than server timeout
-        });
-
-        if (!response.ok) {
-            let detail = "LLM error";
-            try {
-                const errData = await response.json();
-                detail = errData.detail || detail;
-            } catch (_) {
-                // ignore JSON parse failure
-            }
-
-            if (response.status === 503) {
-                throw new Error(
-                    "The local LLM is not running. " +
-                    "Start the Ollama Docker service and pull the configured model."
-                );
-            } else if (response.status === 504) {
-                throw new Error("The LLM took too long to respond. Please try again.");
-            } else {
-                throw new Error(detail);
-            }
-        }
-
-        const data = await response.json();
-        const reply = (data.reply || "").trim();
-
-        if (!reply) {
-            throw new Error("The LLM returned an empty reply.");
-        }
-
-        // Replace "Thinking..." with the actual reply
-        updateTranscriptUI("user", userText);
-        appendTranscriptUI("avatar", reply);
-        setStatus("Ready");
-        updatePTTUI(STTState.IDLE);
-        avatarController.setState(AvatarState.IDLE);
-
-        // Speak the generated reply using the same audio/lip-sync path as Speak.
-        setStatus("Generating reply speech...");
-        try {
-            await speakWithKokoro(reply);
-        } catch (speechError) {
-            console.error("Reply speech failed:", speechError);
-            appendTranscriptUI("error", `Speech failed: ${speechError.message}`);
-            setStatus("Reply received, but speech failed.");
-        }
-
-    } catch (err) {
-        console.error("LLM error:", err);
-
-        let userMsg = err.message;
-        if (err.name === "TimeoutError" || err.name === "AbortError") {
-            userMsg = "LLM request timed out. Please try again.";
-        } else if (err.name === "TypeError" && err.message.includes("fetch")) {
-            userMsg = "Cannot reach the LLM server. Is it running?";
-        }
-
-        // Show error in transcript (keep user speech visible)
-        updateTranscriptUI("user", userText);
-        appendTranscriptUI("error", `⚠️ ${userMsg}`);
-        setStatus("LLM unavailable");
-        updatePTTUI(STTState.ERROR, userMsg);
-        avatarController.setState(AvatarState.IDLE);
-
-        setTimeout(() => {
-            updatePTTUI(STTState.IDLE);
-            setStatus("Ready");
-        }, 5000);
-    }
-}
-
-/**
  * STT Manager instance.
  */
 const sttManager = new STTManager({
-    endpoint: STT_SERVER_URL,
+    endpoint: BACKEND_URL,
     onStateChange: (state, detail) => {
         updatePTTUI(state, detail);
     },
-    onTranscript: async (result) => {
-        // 1. Show user transcript immediately
+    onTranscript: (result) => {
         updateTranscriptUI("user", result.text);
-        setStatus("Transcribed — sending to LLM...");
-
-        // 2. Send to LLM (async — shows THINKING state inside)
-        await sendToLLM(result.text);
+        updatePTTUI("THINKING");
+        avatarController.setState(AvatarState.IDLE);
+        setStatus("Transcribed — generating reply...");
+    },
+    onEvent: (event) => {
+        if (event.type === "llm_delta") {
+            if (!window.currentAvatarReply) {
+                window.currentAvatarReply = "";
+                appendTranscriptUI("avatar", "");
+            }
+            window.currentAvatarReply += event.text;
+            const replies = transcriptBody?.querySelectorAll(".transcript-reply");
+            if (replies?.length) replies[replies.length - 1].textContent = window.currentAvatarReply;
+        } else if (event.type === "speech") {
+            speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event)).catch((error) => {
+                console.error("Speech playback failed:", error);
+                setStatus("Speech playback failed.");
+            });
+        } else if (event.type === "metrics") {
+            console.info("Conversation metrics", event.metrics);
+        } else if (event.type === "done") {
+            window.currentAvatarReply = "";
+            setStatus("Ready");
+            updatePTTUI(STTState.IDLE);
+        }
     },
     onError: (errorMsg) => {
         updateTranscriptUI("error", errorMsg);
@@ -400,10 +284,8 @@ const pushToTalk = new KeyboardPushToTalk({
     },
     onStop: async () => {
         setStatus("Transcribing...");
-        const audioBlob = await sttManager.stopRecording();
-        if (audioBlob) {
-            await sttManager.transcribe(audioBlob);
-        } else {
+        const sent = await sttManager.stopRecording();
+        if (!sent) {
             const msg = "No speech detected. Please try again.";
             updateTranscriptUI("error", msg);
             updatePTTUI(STTState.IDLE);
@@ -588,22 +470,8 @@ async function executeAction(
  * Stop any currently running Kokoro request.
  */
 function cancelSpeechRequest() {
-
-    if (speechRequestController) {
-
-        try {
-            speechRequestController.abort();
-        } catch (error) {
-
-            console.warn(
-                "Failed to abort TTS request:",
-                error
-            );
-        }
-
-        speechRequestController =
-            null;
-    }
+    speechSocket?.close();
+    speechSocket = null;
 }
 
 /**
@@ -638,32 +506,26 @@ async function speakWithKokoro(text) {
         );
     }
 
-    const response = await fetch(
-        `${TTS_SERVER_URL}/synthesize`,
-        {
-            method: "POST",
+    const result = await new Promise((resolve, reject) => {
+        speechSocket = new WebSocket(BACKEND_URL.replace(/^http/, "ws") + "/ws");
+        speechSocket.onopen = () => speechSocket.send(JSON.stringify({
+            type: "start", mode: "speak", text,
+        }));
+        speechSocket.onmessage = ({ data }) => {
+            const event = JSON.parse(data);
+            if (event.type === "speech") resolve(event);
+            else if (event.type === "error") reject(new Error(event.message));
+            else if (event.type === "done") {
+                speechSocket?.close();
+                speechSocket = null;
+            }
+        };
+        speechSocket.onerror = () => reject(new Error("Cannot reach the conversation backend."));
+    });
+    await playSpeechResult(result);
+}
 
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-                text: text,
-                voice: "af_bella",
-                speed: 1.0
-            })
-        }
-    );
-
-    if (!response.ok) {
-        const errorText = await response.text();
-
-        throw new Error(
-            `Kokoro server returned ${response.status}: ${errorText}`
-        );
-    }
-
-    const result = await response.json();
+async function playSpeechResult(result) {
 
     /*
      * Validate backend response.
@@ -883,6 +745,10 @@ async function initializeAvatar() {
                      */
                     lipsyncModules:
                         ["en"],
+
+                    // Keep generated speech at unity gain.
+                    mixerGainSpeech:
+                        1,
 
                     /*
                      * Camera controls.

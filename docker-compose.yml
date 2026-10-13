@@ -20,7 +20,6 @@ services:
     volumes:
       - ollama-models:/root/.ollama
     environment:
-      OLLAMA_CONTEXT_LENGTH: "8192"
       OLLAMA_KEEP_ALIVE: "10m"
     deploy:
       resources:
@@ -38,45 +37,50 @@ services:
 
   ollama-init:
     image: ollama/ollama:latest
+    volumes:
+      - ./backend/config.yaml:/app-config.yaml:ro
     environment:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
-        if ! ollama show qwen3.5:2b >/dev/null 2>&1; then
-          echo "Downloading qwen3.5:2b..."
-          ollama pull qwen3.5:2b
+        LLM_URL=$$(sed -n 's/^llm_url: *//p' /app-config.yaml)
+        OLLAMA_MODEL=$$(sed -n 's/^llm_model: *//p' /app-config.yaml)
+        if [ -z "$$OLLAMA_MODEL" ]; then
+          echo "llm_model is missing from backend/config.yaml"
+          exit 1
         fi
-        echo "Warming up qwen3.5:2b..."
-        ollama run --think=false --keepalive=10m qwen3.5:2b "Reply with READY only."
+        if [ "$$LLM_URL" != "http://ollama:11434/v1" ] && [ "$$LLM_URL" != "http://ollama:11434" ]; then
+          echo "Using external OpenAI-compatible API; skipping Ollama model setup."
+          exit 0
+        fi
+        if ! ollama show "$$OLLAMA_MODEL" >/dev/null 2>&1; then
+          echo "Downloading $$OLLAMA_MODEL..."
+          ollama pull "$$OLLAMA_MODEL"
+        fi
+        echo "Warming up $$OLLAMA_MODEL..."
+        ollama run --think=false --keepalive=10m "$$OLLAMA_MODEL" "Reply with READY only."
         echo "Ollama model is ready."
     depends_on:
       ollama:
         condition: service_healthy
     restart: "no"
 
-  tts-server:
+  backend:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
-    container_name: virtual-human-tts
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: virtual-human-backend
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/config.yaml:/app/backend/config.yaml:ro
+      - ./.cache/faster-whisper:/app/.cache/faster-whisper:ro
+      - ./backend/supertonic/assets:/app/backend/supertonic/assets:ro
+      - ./backend/metrics-data:/app/data
     environment:
-      KOKORO_URL: http://kokoro:8880
-      LLM_ENABLED: "true"
-      LLM_BASE_URL: http://ollama:11434
-      LLM_MODEL: qwen3.5:2b
-      LLM_TEMPERATURE: "0.7"
-      LLM_MAX_TOKENS: "256"
-      LLM_CONTEXT_LENGTH: "8192"
-      LLM_PROVIDER: ollama
-      TTS_PROVIDER: kokoro
-      STT_PROVIDER: whisper-http
-      STT_BASE_URL: http://stt-server:8001
-      LLM_TIMEOUT: "120"
-      LLM_HISTORY_TURNS: "8"
+      METRICS_CSV_PATH: /app/data/metrics.csv
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -84,8 +88,6 @@ services:
         condition: service_healthy
       ollama-init:
         condition: service_completed_successfully
-      stt-server:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 5s
@@ -94,39 +96,17 @@ services:
       retries: 30
     restart: unless-stopped
 
-  stt-server:
-    build:
-      context: .
-      dockerfile: stt-server/Dockerfile
-    container_name: virtual-human-stt
-    ports:
-      - "8001:8001"
-    environment:
-      WHISPER_MODEL: base
-      WHISPER_DEVICE: cpu
-      WHISPER_COMPUTE_TYPE: int8
-    volumes:
-      - whisper-models:/root/.cache/huggingface
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
-      interval: 5s
-      timeout: 10s
-      start_period: 300s
-      retries: 60
-    restart: unless-stopped
-
   talking-avatar:
     build:
       context: ./talking-avatar
       dockerfile: Dockerfile
       args:
-        VITE_TTS_SERVER_URL: http://localhost:8000
-        VITE_STT_SERVER_URL: http://localhost:8000
+        VITE_BACKEND_URL: http://localhost:8000
     container_name: virtual-human-avatar
     ports:
       - "4173:4173"
     depends_on:
-      tts-server:
+      backend:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4173').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
@@ -138,4 +118,3 @@ services:
 
 volumes:
   ollama-models:
-  whisper-models:

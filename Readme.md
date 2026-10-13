@@ -1,129 +1,191 @@
 # Virtual Human
 
-Local talking avatar with an HTTP backend, Ollama Qwen3.5 2B, Kokoro speech synthesis, and faster-whisper transcription.
+Virtual Human is a browser based talking avatar. One FastAPI backend handles
+speech recognition, LLM streaming, speech synthesis, and websocket sessions.
+Faster-Whisper and Supertonic run inside that backend. Kokoro and the selected
+OpenAI-compatible LLM endpoint remain provider services.
 
-## Start
+## Architecture
 
-Start Docker Desktop with NVIDIA GPU support, then run:
+| Component | Responsibility | Default location |
+|---|---|---|
+| `talking-avatar` | Browser UI, microphone capture, avatar rendering, ordered audio playback | `http://localhost:4173` |
+| `backend` | WebSocket API, STT, conversation history, streamed LLM handling, TTS | `http://localhost:8000` |
+| Faster-Whisper | In-process STT model loaded by the backend | Backend container |
+| Supertonic 3 | In-process ONNX TTS model loaded by the backend | Backend container |
+| Kokoro | Optional HTTP TTS provider | `http://localhost:8880` |
+| LLM provider | OpenAI-compatible streaming chat completions | Host port `8888` by default; Ollama is also available in Compose |
 
-```powershell
-docker compose up
+The Compose stack has no separate STT or application LLM/TTS API containers.
+The `backend` service is the application API. The `ollama` and `kokoro`
+services are provider endpoints; the backend calls them only when configured
+to do so. The `ollama-init` service checks the configured endpoint and prepares
+the model when Ollama is selected.
+
+## Requirements
+
+- Docker Desktop or Docker Engine with the Compose plugin.
+- `uv` and network access for the one-time local model setup.
+- An OpenAI-compatible LLM provider. The default configuration expects it on
+  the host at port `8888` and requests `unsloth/Qwen3.5-0.8B-GGUF:BF16`.
+- For local Faster-Whisper and Supertonic, enough disk space for their model
+  files. Supertonic ONNX assets are about 390 MB.
+
+The included Ollama service requests an NVIDIA GPU. If Docker cannot satisfy
+that reservation, configure a supported GPU runtime or use another LLM
+provider.
+
+## Set up models
+
+From the repository root, download the Faster-Whisper model selected in
+`backend/config.yaml` and the pinned Supertonic 3 assets:
+
+```bash
+cd backend
+./setup.sh
+cd ..
 ```
 
-Compose builds missing images, starts Ollama, automatically pulls `qwen3.5:2b` if absent, and warms the model before starting the API. Whisper downloads its configured model on first startup. Both model caches persist in Docker volumes. Health checks hold back the API until the providers are ready, then start the avatar. First startup requires internet access and time to download images and models.
+The script creates/syncs the local `uv` environment, downloads Faster-Whisper
+to `.cache/faster-whisper`, and downloads Supertonic assets to
+`backend/supertonic/assets`. Compose mounts both model locations into the
+backend container. Run setup again after changing the Faster-Whisper model.
 
-Open http://localhost:4173 after startup completes. Hold Space to speak; release it to transcribe, generate a reply, and speak that reply with lip synchronization.
+## Configure providers
 
-For background startup that waits until all services are ready:
+Edit `backend/config.yaml` before startup. The Compose backend reads this file
+as a read-only mount.
 
-```powershell
-docker compose up -d --wait --wait-timeout 900
+### LLM
+
+The default `llm_url` is `http://host.docker.internal:8888/v1`, which lets the
+backend container reach a provider listening on the host. Keep the provider
+model ID in `llm_model` aligned with that server.
+
+To use the Ollama service in Compose, set the active values to the Ollama
+endpoint and model, for example:
+
+```yaml
+llm_url: http://ollama:11434/v1
+llm_model: qwen3.5:2b
+llm_api_key: not-needed
+llm_extra_body: {}
 ```
 
-After changing source code, rebuild:
+`ollama-init` pulls the configured model if it is missing and warms it before
+the backend starts. For another OpenAI-compatible provider, set `llm_url`,
+`llm_model`, and `llm_api_key` as required by that provider.
 
-```powershell
+### TTS
+
+Supertonic is the default and runs in the backend process. Set
+`tts_provider: supertonic`; choose a Supertonic voice style such as `F1` or
+`F2`. The model assets must be present from setup.
+
+To use the Kokoro service instead, configure:
+
+```yaml
+tts_provider: kokoro
+tts_url: http://kokoro:8880
+tts_voice: af_bella
+```
+
+Kokoro returns word timings for lip synchronization. Supertonic returns
+approximate word timings distributed across the generated audio. The Compose
+Kokoro service is started with the stack and reports ready before the backend
+starts.
+
+### STT and conversation
+
+Faster-Whisper runs in process. `faster_whisper_model`, `faster_whisper_device`,
+and `faster_whisper_compute_type` select its model and runtime. The API reads
+the cached model locally and does not download it on startup.
+
+Other commonly changed settings include `max_audio_bytes`, `max_tokens`,
+`temperature`, `history_turns`, `tts_speed`, `tts_supertonic_steps`,
+`max_speech_segment_chars`, and `tts_max_concurrent_segments`. Restart the
+backend after editing configuration.
+
+## Start and stop
+
+After model setup and provider configuration, build and start the application:
+
+```bash
+docker compose up --build
+```
+
+Open [http://localhost:4173](http://localhost:4173), hold Space to record, and
+release Space to submit the audio. The backend transcribes the complete
+recording, streams LLM text, and synthesizes speech segments while generation
+continues.
+
+For detached startup with health checks:
+
+```bash
 docker compose up -d --build --wait --wait-timeout 900
 ```
 
-The `ollama-init` service exits successfully after initialization; that is expected. If a download fails, fix the connection and rerun `docker compose up`. Existing model files are reused. Models stay warm for ten minutes after use; a later request can still incur loading time after idle eviction or a restart.
+Stop the stack with:
 
-```powershell
+```bash
 docker compose down
-docker compose logs -f ollama-init tts-server stt-server
 ```
 
-`Start-VirtualHuman.ps1` remains a convenience wrapper around the same Compose startup; no separate launch script or manual model pull is required.
+`Start-VirtualHuman.ps1` is a Windows convenience wrapper for Compose.
 
-## Modular backend
+## Streaming and playback
 
-```text
-main.py                         Single HTTP server entry point
-backend/
-  app.py                        Startup, CORS, errors, latency logging
-  config.py                     Environment configuration and prompt loading
-  schemas.py                    Shared request and response contracts
-  providers.py                  Provider registry and construction
-  conversation.py               Session history and chat orchestration
-  api/routes.py                 HTTP transport and endpoint wiring
-  llm/
-    base.py                     LLM provider interface
-    ollama.py                   Ollama implementation
-    prompts/system.txt          Exactly 300 nonempty instruction lines
-  tts/
-    base.py                     TTS provider interface
-    kokoro.py                   Kokoro audio and word timings
-  stt/
-    base.py                     STT provider interface
-    whisper_http.py             Gateway adapter for the Whisper worker
-    whisper_engine.py           Isolated faster-whisper worker
-  Dockerfile                    Main API image
-  requirements.txt              Main API dependencies
-tests/test_backend.py           Backend contract tests
+The backend prefers sentence periods (`.`) as speech boundaries. When buffered
+text reaches `max_speech_segment_chars` without a period, it falls back to
+configured punctuation and then a word boundary. It synthesizes and sends each
+segment during LLM generation. The browser processes speech events in arrival
+order before queuing them with TalkingHead, so asynchronous audio decoding
+cannot reorder segments.
+
+Supertonic audio is peak-normalized to -1 dBFS before WAV encoding. Speech
+playback uses unity gain in TalkingHead, and the browser's operating-system
+output level still affects what you hear.
+
+## API and observability
+
+- `GET /health` reports backend health.
+- `WS /ws` accepts a JSON `start` event, microphone audio chunks, and an `end`
+  event. It emits `transcript`, `llm_delta`, ordered `speech`, and `metrics`
+  events, followed by `done`. A `cancel` event cancels the current recording.
+
+The `start` event accepts `session_id`, `mime_type`, `voice`, `speed`, `mode`,
+and optional `text`. Use `mode: "speak"` with `text` for direct TTS; omit text
+to send microphone audio for transcription and conversation. API logs include
+the configured provider/model names, user transcript, final LLM response,
+estimated tokens per second, TTS segment count, and latency metrics. Token rate
+is estimated because the OpenAI-compatible stream does not provide token usage.
+
+Metrics are appended to `backend/metrics-data/metrics.csv` and persist on the
+host across container restarts. They include provider/model names, STT total
+time, LLM time to first token and total time, TTS time to first audio result,
+segment count, end-to-end timing, audio size, and status.
+
+Inspect service logs with:
+
+```bash
+docker compose logs -f backend talking-avatar
 ```
 
-Run the main server locally with `pip install -r backend/requirements.txt`, then `python main.py`. Set `LLM_BASE_URL=http://localhost:11434`, `KOKORO_URL=http://localhost:8880`, and `STT_BASE_URL=http://localhost:8001` when using locally published Docker providers.
+## Backend development
 
-The Compose service name `tts-server` is retained for compatibility, but it now runs the main API, not just TTS. The browser sends STT, LLM, and TTS requests through port 8000. Ollama, Kokoro, and the isolated Whisper worker remain separate model processes so heavy model dependencies do not enter the API process. The old `llm-server/main.py`, `tts-server/main.py`, and `stt-server/main.py` are compatibility launchers; their implementations live under `backend/`.
+The backend image uses Python 3.13, installs locked dependencies from
+`backend/pyproject.toml` and `backend/uv.lock`, and installs FFmpeg for audio
+decoding. Model files are mounted at runtime rather than downloaded during the
+image build.
 
-There is no WebSocket endpoint. HTTP is the current transport.
+To run the API directly from the backend directory after setup:
 
-## Add a model or SDK
-
-Implement the domain's `base.py` interface in a new module under `backend/llm`, `backend/tts`, or `backend/stt`. Register its constructor in `backend/providers.py` and select it with `LLM_PROVIDER`, `TTS_PROVIDER`, or `STT_PROVIDER`. Keep SDK imports and provider response conversion inside that module. Install new SDK dependencies in the appropriate image. Routes, conversation history, and avatar playback do not need provider-specific changes.
-
-LLM adapters return plain reply text. TTS adapters return base64 WAV audio plus `words`, `wtimes`, and `wdurations` in milliseconds; these timings are required for lip synchronization. STT adapters return `text`, `language`, and audio `duration`.
-
-## Prompt and configuration
-
-The default prompt is `backend/llm/prompts/system.txt`, containing 300 instruction lines for the conversational avatar. Edit it and rebuild the main API image to apply changes. Override the path with `LLM_SYSTEM_PROMPT_FILE` or the entire prompt with `LLM_SYSTEM_PROMPT`. Prompt files are read once at server startup.
-
-| Variable | Default |
-|---|---|
-| LLM_PROVIDER | ollama |
-| LLM_MODEL | qwen3.5:2b |
-| LLM_BASE_URL | http://ollama:11434 |
-| LLM_CONTEXT_LENGTH | 8192 |
-| LLM_MAX_TOKENS | 256 |
-| LLM_TEMPERATURE | 0.7 |
-| LLM_HISTORY_TURNS | 8 |
-| LLM_TIMEOUT | 120 seconds |
-| TTS_PROVIDER | kokoro |
-| KOKORO_URL | http://kokoro:8880 |
-| STT_PROVIDER | whisper-http |
-| STT_BASE_URL | http://stt-server:8001 |
-
-Thinking is disabled for concise spoken responses. Browser sessions use separate IDs for history. History is held in memory with at most 128 sessions, eight turns per session by default; restart or eviction clears it. HTTP callers should supply a unique `session_id`; omitted IDs use the shared compatibility session `default`.
-
-## HTTP API
-
-- `GET /health`: main server status.
-- `GET /llm/health`: configured model availability.
-- `POST /chat`: `message`, optional `session_id`, optional `reset_history`; returns `reply` and `history_length`.
-- `POST /synthesize`: `text`, optional `voice` and `speed`; returns audio and lip-sync timings.
-- `POST /transcribe`: multipart `audio` file, at most 10 MB; returns recognized text, language, and recording duration.
-
-API documentation: http://localhost:8000/docs. The front end requests transcription, chat, and synthesis in sequence. `main.py` hosts and routes all three HTTP operations.
-
-## Latency
-
-Backend logs show STT, LLM, and TTS request times in milliseconds. The Ollama adapter additionally logs model loading, prompt evaluation, and token generation. These exclude microphone capture and browser playback. First requests may include model loading and prompt cache initialization; measure repeated requests separately. A 300-line prompt increases prompt processing and context usage.
-
-Run contract tests in the API image:
-
-```powershell
-Get-Content -Raw tests/test_backend.py | docker compose run --rm --no-deps -T tts-server python -
+```bash
+cd backend
+uv run main.py
 ```
 
-### Measured with the 300-line prompt
-
-Test input: "Hello, how are you today?" on Qwen3.5 2B, RTX 4050, 8192-token context. One initial request and one warm request; timings vary and are not averages.
-
-| Stage | Initial request | Warm request |
-|---|---:|---:|
-| STT | 1.722 s | 3.600 s |
-| LLM | 37.494 s | 1.022 s |
-| TTS | 7.373 s | 3.743 s |
-| Total | 46.591 s | 8.365 s |
-
-The initial LLM request included 35.814 seconds of model loading; prompt evaluation took 0.817 seconds. Measurements exclude input audio preparation, microphone capture, and browser playback. Full results: `benchmarks/300-line-prompt.json`.
+For direct host execution, update provider URLs in `config.yaml` to host-local
+addresses (for example, `http://localhost:8880` for Kokoro). The API listens on
+port 8000 by default. The browser frontend is built separately by its
+`talking-avatar` service.

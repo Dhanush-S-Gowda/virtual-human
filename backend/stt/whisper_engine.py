@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import logging
 import io
+import logging
 import os
 import shutil
 import tempfile
 import wave
-from time import perf_counter
 from contextlib import asynccontextmanager
+from time import perf_counter
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
@@ -16,13 +16,7 @@ from faster_whisper import WhisperModel
 from faster_whisper.audio import decode_audio
 from pydantic import BaseModel
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,15 +42,16 @@ async def lifespan(app: FastAPI):
         decode_audio(audio)
     logger.info(
         "Loading faster-whisper model '%s' on device '%s' with compute type '%s'...",
-        WHISPER_MODEL,
-        WHISPER_DEVICE,
-        WHISPER_COMPUTE_TYPE,
+        settings.faster_whisper_model,
+        settings.faster_whisper_device,
+        settings.faster_whisper_compute_type,
     )
     try:
         whisper_model = WhisperModel(
-            WHISPER_MODEL,
-            device=WHISPER_DEVICE,
-            compute_type=WHISPER_COMPUTE_TYPE,
+            settings.faster_whisper_model,
+            device=settings.faster_whisper_device,
+            compute_type=settings.faster_whisper_compute_type,
+            download_root=settings.faster_whisper_download_root,
         )
         logger.info("faster-whisper model loaded successfully.")
     except Exception as exc:
@@ -101,6 +96,7 @@ app.add_middleware(
 # Models
 # ---------------------------------------------------------------------------
 
+
 @app.middleware("http")
 async def log_request_latency(request, call_next):
     if request.method != "POST" or request.url.path != "/transcribe":
@@ -114,7 +110,9 @@ async def log_request_latency(request, call_next):
     finally:
         logger.info(
             "Latency STT: method=%s path=%s status=%s elapsed_ms=%.2f",
-            request.method, request.url.path, status_code,
+            request.method,
+            request.url.path,
+            status_code,
             (perf_counter() - started) * 1000,
         )
 
@@ -134,6 +132,7 @@ class TranscribeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
@@ -233,7 +232,9 @@ async def transcribe(audio: UploadFile = File(...)):
             try:
                 os.unlink(temp_path)
             except OSError as err:
-                logger.warning("Could not delete temp audio file %s: %s", temp_path, err)
+                logger.warning(
+                    "Could not delete temp audio file %s: %s", temp_path, err
+                )
 
 
 if __name__ == "__main__":
