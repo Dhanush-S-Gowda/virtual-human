@@ -17,7 +17,8 @@ backend. Kokoro and the OpenAI-compatible LLM endpoint are provider services.
 - `tts/kokoro.py`: HTTP adapter for the optional Kokoro service.
 - `llm/openai.py`: streaming OpenAI-compatible chat adapter.
 - `Dockerfile`: Python 3.13 API image using the locked `uv` environment.
-- `setup.sh`: local development environment and model asset setup.
+- `setup.sh` / `setup.ps1`: local development environment and model asset setup
+  for Linux/macOS and Windows, respectively.
 
 ## Model setup
 
@@ -25,6 +26,12 @@ From this directory, run:
 
 ```bash
 ./setup.sh
+```
+
+On Windows, run the PowerShell equivalent from this directory:
+
+```powershell
+.\setup.ps1
 ```
 
 This synchronizes dependencies, downloads the configured Faster-Whisper model
