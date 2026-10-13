@@ -1,0 +1,3 @@
+stt_provider,stt_model,llm_provider,llm_model,tts_provider,tts_model,stt_total_ms,llm_ttft_ms,llm_total_ms,llm_tokens_per_second,tts_ttfb_ms,first_speech_end_to_end_ms,end_to_end_ms,audio_bytes,tts_segments,status
+faster-whisper,base,openai,unsloth/Qwen3.5-0.8B-GGUF:BF16,supertonic,supertonic-3,2175.97,626.04,5274.41,1.9,1952.45,10483.3,10518.32,49735,1,ok
+faster-whisper,base,openai,unsloth/Qwen3.5-0.8B-GGUF:BF16,supertonic,supertonic-3,2332.32,923.02,12268.4,2.93,7813.65,17490.09,17615.63,49070,4,ok

@@ -1,0 +1,57 @@
+# API listener
+host: 0.0.0.0
+port: 8000
+
+# Select one OpenAI-compatible LLM endpoint.
+llm_provider: openai
+llm_url: http://127.0.0.1:8888/v1
+llm_model: unsloth/Qwen3.5-0.8B-GGUF:BF16
+llm_api_key: not-needed
+llm_extra_body:
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.05
+  repetition_penalty: 1.1
+  enable_thinking: false
+  enable_tools: false
+
+# Ollama alternative. Comment the active LLM values above and uncomment these.
+# llm_url: http://ollama:11434/v1
+# llm_model: qwen3.5:2b
+# llm_api_key: not-needed
+# llm_extra_body: {}
+
+# Speech-to-text. The model is downloaded by setup.sh.
+stt_provider: faster-whisper
+faster_whisper_model: base
+faster_whisper_device: cpu
+faster_whisper_compute_type: int8
+faster_whisper_download_root: .cache/faster-whisper
+
+# Select one text-to-speech provider. Keep the alternative block commented.
+# Supertonic (local ONNX model)
+tts_provider: supertonic
+tts_voice: F1
+tts_language: en
+tts_supertonic_steps: 4
+tts_max_concurrent_segments: 4
+tts_device: auto  # auto selects CUDA, then OpenVINO GPU, then CPU; cpu forces CPU
+max_speech_segment_words: 16
+
+# Kokoro (HTTP service)
+# tts_provider: kokoro
+# tts_url: http://localhost:8880
+# tts_voice: af_bella
+# tts_sample_rate: 24000
+
+# Shared speech rate
+tts_speed: 1.0
+
+# Conversation behavior
+enabled: true
+timeout: 120
+temperature: 0.7
+max_tokens: 256
+history_turns: 8
+max_audio_bytes: 10000000
+system_prompt_file: llm/prompts/system.txt
