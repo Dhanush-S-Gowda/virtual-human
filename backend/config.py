@@ -15,11 +15,11 @@ DEFAULTS = {
     "faster_whisper_device": "cpu",
     "faster_whisper_compute_type": "int8",
     "faster_whisper_download_root": ".cache/faster-whisper",
-    "max_speech_segment_words": 10,
+    "max_speech_segment_words": 8,
     "tts_device": "auto",
     "tts_max_concurrent_segments": 2,
     "tts_language": "en",
-    "tts_supertonic_steps": 8,
+    "tts_supertonic_steps": 2,
     "tts_supertonic_voice_style": "supertonic/assets/voice_styles/F1.json",
 }
 config = {**DEFAULTS, **(config or {})}

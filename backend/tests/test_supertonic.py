@@ -4,7 +4,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 from schemas import SynthesizeResponse
 from tts.supertonic import SupertonicProvider, _approximate_word_timings, _resolve_style

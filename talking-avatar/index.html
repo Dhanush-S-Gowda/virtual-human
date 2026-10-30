@@ -354,7 +354,200 @@
             background: #991b1b;
         }
 
-        @media (max-width: 700px) {
+        #mainLayout {
+            display: flex;
+            flex-direction: row;
+            width: 100%;
+            height: 100%;
+            position: relative;
+            overflow: hidden;
+            background: #0f1117;
+        }
+
+        #leftPanel {
+            flex: 1;
+            min-width: 0;
+            height: 100%;
+            background: #0b0d13;
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+            gap: 12px;
+            box-sizing: border-box;
+            overflow-y: auto;
+            z-index: 5;
+        }
+
+        #rightPanel {
+            flex: 1;
+            min-width: 0;
+            height: 100%;
+            position: relative;
+            overflow: hidden;
+            background: #111;
+        }
+
+        #cvHeader {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .cv-title-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+            animation: live-pulse 1.5s infinite;
+        }
+
+        @keyframes live-pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(1.3); }
+        }
+
+        .cv-title {
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            color: #f3f4f6;
+            text-transform: uppercase;
+        }
+
+        .cv-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .cv-badge.connected {
+            background: rgba(34, 197, 94, 0.2);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.4);
+        }
+
+        .cv-badge.disconnected {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+        }
+
+        #cvCanvasContainer {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 4 / 3;
+            max-height: 52vh;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #cvCanvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        #cvPlaceholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #9ca3af;
+            gap: 8px;
+            background: rgba(13, 15, 20, 0.95);
+            text-align: center;
+            padding: 20px;
+            font-size: 14px;
+        }
+
+        #cvInfoBar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .info-pill {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 5px 12px;
+            font-size: 12px;
+            color: #e5e7eb;
+            font-weight: 500;
+        }
+
+        #cvTrackList {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            overflow-y: auto;
+            max-height: 25vh;
+        }
+
+        .track-card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+
+        .track-card .track-name {
+            font-weight: 600;
+            color: #60a5fa;
+        }
+
+        .track-card.known .track-name {
+            color: #34d399;
+        }
+
+        .track-card .track-sub {
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        @media (max-width: 900px) {
+            #mainLayout {
+                flex-direction: column;
+                overflow-y: auto;
+            }
+
+            #leftPanel {
+                height: auto;
+                min-height: 400px;
+                border-right: none;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            }
+
+            #rightPanel {
+                height: 600px;
+                min-height: 500px;
+            }
+
             #controls {
                 left: 10px;
                 right: 10px;
@@ -382,88 +575,129 @@
 <body>
 
 <div id="app">
+    <div id="mainLayout">
+        <!-- LEFT PANEL: Live Computer Vision Feed -->
+        <div id="leftPanel">
+            <div id="cvHeader">
+                <div class="cv-title-group">
+                    <span class="live-dot"></span>
+                    <span class="cv-title">Live Camera Feed</span>
+                </div>
+                <div id="cvStatusBadge" class="cv-badge disconnected">Disconnected</div>
+            </div>
 
-    <!-- TalkingHead renders here -->
-    <div id="avatar"></div>
+            <div id="cvCanvasContainer">
+                <canvas id="cvCanvas" width="640" height="480"></canvas>
+                <div id="cvPlaceholder">
+                    <div style="font-size: 32px;">📹</div>
+                    <div>Connecting to CV feed...</div>
+                    <div style="font-size: 12px; color: #6b7280;">ws://localhost:8765</div>
+                </div>
+            </div>
 
-    <!-- Status -->
-    <div id="status">
-        Initializing...
-    </div>
+            <div id="cvInfoBar">
+                <div class="info-pill" id="cvPeopleCount">👥 People: 0</div>
+                <div class="info-pill" id="cvActionBadge">⚡ Action: None</div>
+                <div class="info-pill" id="cvFpsBadge">📊 12 FPS Target</div>
+            </div>
 
-    <!-- Loading -->
-    <div id="loading">
-        Loading avatar...
-    </div>
-
-    <!-- Transcript Area -->
-    <div id="transcriptContainer">
-        <div id="transcriptHeader">
-            <span>Conversation</span>
-            <span id="sttBadge">STT: faster-whisper</span>
+            <div id="cvTrackList">
+                <!-- Dynamically updated track cards -->
+            </div>
         </div>
-        <div id="transcriptBody">
-            <span style="color: #9ca3af;">Hold SPACE to speak to the avatar...</span>
+
+        <!-- RIGHT PANEL: TalkingHead Avatar Assistant -->
+        <div id="rightPanel">
+            <!-- TalkingHead renders here -->
+            <div id="avatar"></div>
+
+            <!-- Status -->
+            <div id="status">
+                Initializing...
+            </div>
+
+            <!-- Loading -->
+            <div id="loading">
+                Loading avatar...
+            </div>
+
+            <!-- Transcript Area -->
+            <div id="transcriptContainer">
+                <div id="transcriptHeader">
+                    <span>Conversation</span>
+                    <span id="sttBadge">STT: faster-whisper</span>
+                </div>
+                <div id="transcriptBody">
+                    <span style="color: #9ca3af;">Hold SPACE to speak to the avatar...</span>
+                </div>
+            </div>
+
+            <!-- Push-to-Talk visual feedback banner -->
+            <div id="pttBanner" class="ptt-idle">
+                <span id="pttIcon">🎤</span>
+                <span id="pttText">Hold SPACE to speak</span>
+            </div>
+
+            <!-- Controls -->
+            <div id="controls">
+
+                <input
+                    id="speechText"
+                    type="text"
+                    value="Hello! I am your avatar."
+                    placeholder="Type something to say..."
+                />
+
+                <button
+                    id="speakButton"
+                    class="primary"
+                >
+                    Speak
+                </button>
+
+                <button id="idleButton">
+                    Idle
+                </button>
+
+                <button id="waveButton">
+                    Wave
+                </button>
+
+                <button id="danceButton">
+                    Dance
+                </button>
+
+                <button id="poseButton">
+                    Pose
+                </button>
+
+                <button id="thumbButton">
+                    👍
+                </button>
+
+                <button id="namasteButton">
+                    🙏
+                </button>
+
+                <button id="nodButton">
+                    Nod
+                </button>
+
+                <button id="happyButton">
+                    Happy
+                </button>
+
+                <button id="neutralButton">
+                    Neutral
+                </button>
+
+                <button id="stopButton" class="danger">
+                    Stop
+                </button>
+
+            </div>
         </div>
     </div>
-
-    <!-- Push-to-Talk visual feedback banner -->
-    <div id="pttBanner" class="ptt-idle">
-        <span id="pttIcon">🎤</span>
-        <span id="pttText">Hold SPACE to speak</span>
-    </div>
-
-    <!-- Controls -->
-    <div id="controls">
-
-        <input
-            id="speechText"
-            type="text"
-            value="Hello! I am your avatar."
-            placeholder="Type something to say..."
-        />
-
-        <button
-            id="speakButton"
-            class="primary"
-        >
-            Speak
-        </button>
-
-        <button id="idleButton">
-            Idle
-        </button>
-
-        <button id="waveButton">
-            Wave
-        </button>
-
-        <button id="danceButton">
-            Dance
-        </button>
-
-        <button id="poseButton">
-            Pose
-        </button>
-
-        <button id="thumbButton">
-            👍
-        </button>
-
-        <button id="happyButton">
-            Happy
-        </button>
-
-        <button id="neutralButton">
-            Neutral
-        </button>
-
-        <button id="stopButton" class="danger">
-            Stop
-        </button>
-
-    </div>
-
 </div>
 
 <script type="module" src="/src/main.js"></script>

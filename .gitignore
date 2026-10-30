@@ -362,3 +362,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+cv/yolo26n.pt
+cv/yolov8n-pose.pt
+*.pt

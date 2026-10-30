@@ -89,6 +89,11 @@ by whitespace (decimal/version periods stay within the word) or at the
 configured `max_speech_segment_words` limit for long unpunctuated text. Commas do not
 trigger a split. Ordered `speech` events, metrics, and `done` follow.
 
+The low-latency configuration defaults to eight words per segment, two
+Supertonic inference steps, and up to two concurrent segment syntheses. These
+settings can reduce first-audio latency; fewer inference steps may reduce
+naturalness, and shorter segments can increase total synthesis work.
+
 TTS responses include base64 WAV audio, sample rate, and word timing arrays for
 lip synchronization. Supertonic timings are approximate. The root
 [README](../Readme.md) describes the full application setup and websocket

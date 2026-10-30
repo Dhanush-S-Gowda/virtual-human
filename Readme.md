@@ -51,6 +51,12 @@ to `.cache/faster-whisper`, and downloads Supertonic assets to
 `backend/supertonic/assets`. Compose mounts both model locations into the
 backend container. Run setup again after changing the Faster-Whisper model.
 
+If using Kokoro TTS instead of Supertonic, pull the Kokoro Docker image:
+
+```bash
+docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
 ## Configure providers
 
 Edit `backend/config.yaml` before startup. The Compose backend reads this file
@@ -82,7 +88,13 @@ Supertonic is the default and runs in the backend process. Set
 `tts_provider: supertonic`; choose a Supertonic voice style such as `F1` or
 `F2`. The model assets must be present from setup.
 
-To use the Kokoro service instead, configure:
+To use the Kokoro service instead, pull the Docker image:
+
+```bash
+docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
+And configure:
 
 ```yaml
 tts_provider: kokoro
@@ -103,7 +115,7 @@ the cached model locally and does not download it on startup.
 
 Other commonly changed settings include `max_audio_bytes`, `max_tokens`,
 `temperature`, `history_turns`, `tts_speed`, `tts_supertonic_steps`,
-`max_speech_segment_chars`, and `tts_max_concurrent_segments`. Restart the
+`max_speech_segment_words`, and `tts_max_concurrent_segments`. Restart the
 backend after editing configuration.
 
 ## Start and stop
@@ -135,12 +147,16 @@ docker compose down
 
 ## Streaming and playback
 
-The backend prefers sentence periods (`.`) as speech boundaries. When buffered
-text reaches `max_speech_segment_chars` without a period, it falls back to
-configured punctuation and then a word boundary. It synthesizes and sends each
-segment during LLM generation. The browser processes speech events in arrival
-order before queuing them with TalkingHead, so asynchronous audio decoding
-cannot reorder segments.
+The backend prefers sentence periods (`.`) as speech boundaries and splits
+longer sentences at `max_speech_segment_words`. The low-latency defaults use
+eight words per segment, two Supertonic inference steps, and up to two
+concurrent segment syntheses. Shorter first segments and fewer inference steps
+can reduce TTS time to first audio at some cost to speech naturalness; more
+segments may increase total synthesis work. GPU acceleration depends on the
+available ONNX Runtime provider and hardware. The backend synthesizes and sends
+each segment during LLM generation. The browser processes speech events in
+arrival order before queuing them with TalkingHead, so asynchronous audio
+decoding cannot reorder segments.
 
 Supertonic audio is peak-normalized to -1 dBFS before WAV encoding. Speech
 playback uses unity gain in TalkingHead, and the browser's operating-system

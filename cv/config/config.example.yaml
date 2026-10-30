@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────
+# CV Assistant — Example Configuration
+# Copy to config.yaml and adjust values for your environment.
+# ─────────────────────────────────────────────────────────────
+
+# ── Camera ──────────────────────────────────────────────────
+camera:
+  device_index: 0                  # Webcam index or path to video file
+  width: 640                       # Capture width
+  height: 480                      # Capture height
+  fps: 30                          # Capture FPS (camera will clamp to its max)
+  camera_id: "default"             # Logical camera identifier for events
+  frame_queue_size: 2              # Max queued frames; older frames are dropped
+
+# ── Detection ───────────────────────────────────────────────
+detection:
+  model: "yolov8n-pose.pt"        # YOLO model file (downloaded automatically)
+  device: "auto"                   # "auto", "cuda", "cpu"
+  target_fps: 12                   # Target inference FPS for pose detection
+  confidence: 0.5                  # Minimum detection confidence
+  iou_threshold: 0.45              # NMS IoU threshold
+
+# ── Tracking ────────────────────────────────────────────────
+tracking:
+  tracker: "bytetrack.yaml"       # Tracker config (ultralytics built-in)
+  track_buffer: 30                # Frames to keep lost tracks before removal
+  enter_min_frames: 3             # Stable frames before person_entered event
+  leave_timeout_sec: 3.0          # Seconds without detection before person_left
+
+# ── Actions ─────────────────────────────────────────────────
+actions:
+  buffer_size: 30                 # Keypoint frames to keep per track
+  waving:
+    min_wrist_above_shoulder: true  # Wrist must be at/above shoulder height
+    min_oscillations: 3             # Minimum side-to-side cycles
+    window_frames: 20              # Temporal window for oscillation detection
+    cooldown_sec: 3.0              # Seconds between repeat waving events
+    min_confidence: 0.4             # Minimum keypoint confidence
+  hand_raised:
+    min_wrist_above_head_ratio: 0.85  # Wrist y < head y * ratio (normalized)
+    min_hold_frames: 5                # Frames wrist must stay raised
+    cooldown_sec: 3.0
+    min_confidence: 0.4
+
+# ── Face Recognition ────────────────────────────────────────
+face:
+  enabled: true
+  model_name: "buffalo_l"         # InsightFace model pack
+  detection_threshold: 0.5        # Face detection confidence
+  embedding_interval_sec: 2.0     # Seconds between face embedding attempts per track
+  recheck_interval_sec: 30.0      # Re-verify identity interval for known tracks
+  quality:
+    min_face_width: 80            # Minimum face crop width in pixels
+    min_detection_score: 0.6      # Minimum face detection score for enrollment
+    max_embeddings_per_person: 10 # Max stored embeddings per identity
+    min_quality_for_update: 0.7   # Quality threshold to update existing identity
+  matching:
+    threshold: 0.45               # Cosine similarity threshold for positive match
+    ambiguity_margin: 0.05        # Min margin between best and second-best match
+    # NOTE: These thresholds MUST be calibrated for your camera and lighting.
+    # The defaults are starting points, not universal values.
+
+# ── Identity Store ──────────────────────────────────────────
+identity:
+  database_path: "data/identities.db"   # SQLite database path (relative to cv/)
+  auto_enroll: false                     # Auto-enroll unknown faces (requires consent)
+  consent_required: true                 # Require explicit consent before storing embeddings
+
+# ── Object Detection ────────────────────────────────────────
+objects:
+  enabled: false                  # Enable general object detection
+  model: "yolov8n.pt"            # Object detection model
+  target_fps: 2                   # Object detection rate (lower than pose)
+  confidence: 0.5
+  classes: []                     # Empty = all classes; or list specific ones
+
+# ── Speaker Association ─────────────────────────────────────
+speaker:
+  name_patterns:                  # Regex patterns for self-introduction
+    - '(?:my name is|i am|i\'m|call me|they call me)\s+(\w+)'
+  single_person_confidence: 0.7   # Confidence when only one person is visible
+  mouth_motion_weight: 0.6        # Weight for mouth motion heuristic
+  ambiguity_threshold: 0.3        # Below this, mark as ambiguous
+
+# ── Integration ─────────────────────────────────────────────
+integration:
+  websocket_host: "0.0.0.0"
+  websocket_port: 8765
+  event_cooldown_sec: 1.0         # Minimum interval between duplicate events
+
+# ── Logging ─────────────────────────────────────────────────
+logging:
+  level: "INFO"                   # DEBUG, INFO, WARNING, ERROR
+  # Never log face embeddings or raw biometric data

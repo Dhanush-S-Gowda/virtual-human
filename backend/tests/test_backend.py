@@ -4,12 +4,16 @@ from pathlib import Path
 import sys
 import unittest
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 from config import settings
 from llm.openai import OpenAIProvider
@@ -27,7 +31,7 @@ class FakeLLM:
     async def health_check(self):
         return True
 
-    async def stream_chat(self, messages):
+    async def stream_chat(self, messages) -> AsyncIterator[str]:
         self.calls.append(messages)
         if self.fail:
             raise httpx.ConnectError("offline")
@@ -118,16 +122,19 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(settings.faster_whisper_model, "base")
         self.assertEqual(settings.faster_whisper_device, "cpu")
         self.assertEqual(settings.faster_whisper_compute_type, "int8")
+        self.assertEqual(settings.max_speech_segment_words, 8)
         self.assertEqual(settings.tts_max_concurrent_segments, 2)
+        self.assertEqual(settings.tts_supertonic_steps, 2)
         self.assertEqual(len(settings.system_prompt.splitlines()), 25)
 
-    def test_speech_segments_split_on_common_punctuation(self):
+    def test_speech_segments_split_on_sentence_periods(self):
         segments, remainder = _split_ready_segments(
-            "This is a short clause, and this is another; finally this ends.", force=True
+            "This is a short clause. This is another. Finally this ends.",
+            force=True,
         )
         self.assertEqual(
             segments,
-            ["This is a short clause,", "and this is another;", "finally this ends."],
+            ["This is a short clause.", "This is another.", "Finally this ends."],
         )
         self.assertEqual(remainder, "")
 
@@ -138,9 +145,13 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(remainder, "My name is Li Yangzhong.")
 
     def test_speech_segments_bound_unpunctuated_text_and_flush_final_text(self):
-        unpunctuated = "word " * 40
+        unpunctuated = "word " * 41
         segments, remainder = _split_ready_segments(unpunctuated)
         self.assertTrue(segments)
+        self.assertLessEqual(
+            max(len(segment.split()) for segment in segments),
+            settings.max_speech_segment_words,
+        )
         self.assertLessEqual(max(map(len, segments)), 120)
         self.assertTrue(remainder)
         tail = remainder
@@ -240,7 +251,7 @@ class BackendTests(unittest.TestCase):
         tts = ConcurrentFakeTTS()
         llm = FakeLLM()
 
-        async def stream_chat(messages):
+        async def stream_chat(messages) -> AsyncIterator[str]:
             llm.calls.append(messages)
             yield "First sentence. Second sentence. Third sentence."
 
@@ -268,6 +279,15 @@ class BackendTests(unittest.TestCase):
             (["hello"], [200.0], [300.0]),
         )
 
+    def test_measured_first_speech_latency_is_under_threshold(self):
+        events = self.run_audio_turn("latency_test")
+        metrics_event = next(e for e in events if e.get("type") == "metrics")
+        metrics = metrics_event["metrics"]
+        self.assertIsNotNone(metrics.get("first_speech_end_to_end_ms"))
+        self.assertLess(metrics["first_speech_end_to_end_ms"], 3200.0)
+        self.assertEqual(metrics["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
+

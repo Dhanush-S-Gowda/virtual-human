@@ -75,6 +75,12 @@ const poseButton =
 const thumbButton =
     document.getElementById("thumbButton");
 
+const namasteButton =
+    document.getElementById("namasteButton");
+
+const nodButton =
+    document.getElementById("nodButton");
+
 const happyButton =
     document.getElementById("happyButton");
 
@@ -232,6 +238,7 @@ const sttManager = new STTManager({
         updatePTTUI("THINKING");
         avatarController.setState(AvatarState.IDLE);
         setStatus("Transcribed — generating reply...");
+        forwardTranscriptToCV(result.text);
     },
     onEvent: (event) => {
         if (event.type === "llm_delta") {
@@ -590,7 +597,8 @@ async function playSpeechResult(result) {
             wdurations: result.wdurations
         },
         {
-            lipsyncLang: "en"
+            lipsyncLang: "en",
+            isRaw: true
         }
     );
 
@@ -939,21 +947,89 @@ function idle() {
 }
 
 
+let activeWaveTimer = null;
+let activeWaveFrame = null;
+
+function stopActiveWave(avatar) {
+    if (activeWaveTimer) {
+        clearTimeout(activeWaveTimer);
+        activeWaveTimer = null;
+    }
+    if (activeWaveFrame) {
+        cancelAnimationFrame(activeWaveFrame);
+        activeWaveFrame = null;
+    }
+    if (avatar) {
+        try {
+            if (avatar.poseDelta && avatar.poseDelta.props) {
+                if (avatar.poseDelta.props['RightForeArm.quaternion']) {
+                    avatar.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: 0 };
+                }
+                if (avatar.poseDelta.props['RightHand.quaternion']) {
+                    avatar.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: 0 };
+                }
+                if (avatar.poseDelta.props['LeftForeArm.quaternion']) {
+                    avatar.poseDelta.props['LeftForeArm.quaternion'] = { x: 0, y: 0, z: 0 };
+                }
+                if (avatar.poseDelta.props['LeftHand.quaternion']) {
+                    avatar.poseDelta.props['LeftHand.quaternion'] = { x: 0, y: 0, z: 0 };
+                }
+            }
+            avatar.stopGesture(500);
+            if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
+                avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
+            }
+        } catch (err) {
+            console.debug("stopActiveWave cleanup warning:", err);
+        }
+    }
+}
+
 /**
- * Wave.
+ * Dynamic Waving animation with natural side-to-side oscillation
+ * and clean arm lowering upon completion.
  */
 function wave() {
 
     executeAction(
         "Wave",
         async (avatar) => {
+            stopActiveWave(avatar);
 
+            // Raise right hand (mirrored = right hand wave!)
             avatar.playGesture(
                 "handup",
-                3,
-                false,
-                500
+                null,
+                true,
+                400
             );
+            avatar.setMood("happy");
+
+            const startTime = performance.now();
+            const waveDurationMs = 2800;
+
+            function animateWave(now) {
+                const elapsed = now - startTime;
+                if (elapsed >= waveDurationMs) {
+                    stopActiveWave(avatar);
+                    avatar.setMood("neutral");
+                    return;
+                }
+
+                // Sinusoidal wave oscillation (envelope smooths start and end)
+                const progress = elapsed / waveDurationMs;
+                const envelope = Math.sin(Math.PI * progress);
+                const angle = Math.sin((elapsed / 1000) * Math.PI * 4.5) * 0.36 * envelope;
+
+                if (avatar.poseDelta && avatar.poseDelta.props) {
+                    avatar.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: angle };
+                    avatar.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: angle * 0.75 };
+                }
+
+                activeWaveFrame = requestAnimationFrame(animateWave);
+            }
+
+            activeWaveFrame = requestAnimationFrame(animateWave);
         }
     );
 }
@@ -1042,13 +1118,65 @@ function thumbUp() {
     executeAction(
         "Thumb up",
         async (avatar) => {
+            stopActiveWave(avatar);
 
             avatar.playGesture(
                 "thumbup",
                 3,
+                true,
+                400
+            );
+            avatar.setMood("happy");
+
+            setTimeout(() => {
+                if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
+                    avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
+                }
+                avatar.setMood("neutral");
+            }, 3000);
+        }
+    );
+}
+
+
+/**
+ * Namaste / Folded hands gesture.
+ */
+function namaste() {
+
+    executeAction(
+        "Namaste",
+        async (avatar) => {
+            stopActiveWave(avatar);
+
+            avatar.playGesture(
+                "namaste",
+                3,
                 false,
                 500
             );
+            avatar.setMood("happy");
+
+            setTimeout(() => {
+                if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
+                    avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
+                }
+                avatar.setMood("neutral");
+            }, 3000);
+        }
+    );
+}
+
+
+/**
+ * Head nod gesture.
+ */
+function nod() {
+
+    executeAction(
+        "Nod",
+        async (avatar) => {
+            avatar.playGesture("yes", 2);
         }
     );
 }
@@ -1121,11 +1249,17 @@ function stopEverything() {
         const avatar =
             requireHead();
 
+        stopActiveWave(avatar);
+
         avatar.stopAnimation();
 
         avatar.stopPose();
 
         avatar.stopGesture();
+
+        if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
+            avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 400);
+        }
 
         avatar.setMood(
             "neutral"
@@ -1198,6 +1332,16 @@ function registerEventHandlers() {
     thumbButton?.addEventListener(
         "click",
         thumbUp
+    );
+
+    namasteButton?.addEventListener(
+        "click",
+        namaste
+    );
+
+    nodButton?.addEventListener(
+        "click",
+        nod
     );
 
     happyButton?.addEventListener(
@@ -1282,6 +1426,553 @@ function registerEventHandlers() {
 
 /**
  * --------------------------------------------------------------------------
+ * Computer Vision Integration (Live Video Feed, Bounding Boxes, Gestures)
+ * --------------------------------------------------------------------------
+ */
+
+const CV_WS_URL = import.meta.env.VITE_CV_URL || "ws://localhost:8765";
+let cvSocket = null;
+let cvReconnectTimer = null;
+let lastGestureTime = 0;
+
+// Frontend Camera Streaming & Zero-Lag Local Preview State
+let frontendVideoStream = null;
+let frontendVideoElement = null;
+let frontendCaptureTimer = null;
+let frontendFrameSeq = 0;
+let isFrontendCameraActive = false;
+let latestCVMetadata = null;
+let lastMetadataReceivedTime = 0;
+
+// Local preview performance tracking
+let previewFrameCount = 0;
+let lastPreviewFPSCheck = performance.now();
+let measuredPreviewFPS = 0;
+let measuredInferenceLatencyMs = 0;
+
+const offscreenCanvas = document.createElement("canvas");
+offscreenCanvas.width = 640;
+offscreenCanvas.height = 480;
+const offscreenCtx = offscreenCanvas.getContext("2d");
+
+async function startFrontendCamera() {
+    if (isFrontendCameraActive) return;
+    try {
+        if (!frontendVideoElement) {
+            frontendVideoElement = document.createElement("video");
+            frontendVideoElement.id = "cvFrontendVideo";
+            frontendVideoElement.autoplay = true;
+            frontendVideoElement.playsInline = true;
+            frontendVideoElement.muted = true;
+            frontendVideoElement.style.display = "none";
+            document.body.appendChild(frontendVideoElement);
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                frameRate: { ideal: 30 }
+            },
+            audio: false
+        });
+
+        frontendVideoStream = stream;
+        frontendVideoElement.srcObject = stream;
+        await frontendVideoElement.play();
+        isFrontendCameraActive = true;
+
+        updateCVPlaceholder(false);
+        updateCVBadge(true);
+        console.log("[CV Frontend Camera] Local camera active (640x480). Zero-lag preview running.");
+
+        requestAnimationFrame(renderFrontendPreviewLoop);
+        startFrontendFrameStreaming();
+    } catch (err) {
+        console.warn("[CV Frontend Camera] Local camera not active, falling back to backend stream:", err);
+    }
+}
+
+function stopFrontendCamera() {
+    isFrontendCameraActive = false;
+    if (frontendCaptureTimer) {
+        clearInterval(frontendCaptureTimer);
+        frontendCaptureTimer = null;
+    }
+    if (frontendVideoStream) {
+        frontendVideoStream.getTracks().forEach(t => t.stop());
+        frontendVideoStream = null;
+    }
+    if (frontendVideoElement) {
+        frontendVideoElement.srcObject = null;
+    }
+}
+
+function startFrontendFrameStreaming() {
+    if (frontendCaptureTimer) clearInterval(frontendCaptureTimer);
+
+    // Stream frames to CV backend at ~15 FPS (every 66 ms)
+    frontendCaptureTimer = setInterval(async () => {
+        if (!isFrontendCameraActive || !frontendVideoElement || frontendVideoElement.readyState < 2) {
+            return;
+        }
+        if (!cvSocket || cvSocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+
+        try {
+            offscreenCtx.drawImage(frontendVideoElement, 0, 0, 640, 480);
+            offscreenCanvas.toBlob(async (blob) => {
+                if (!blob || !cvSocket || cvSocket.readyState !== WebSocket.OPEN) return;
+                const jpegBuffer = await blob.arrayBuffer();
+                const jpegLen = jpegBuffer.byteLength;
+
+                // Protocol: [4B Magic 'FRM1'] + [4B Seq uint32] + [8B Timestamp ms float64] + [4B Length uint32] + [JPEG bytes]
+                const totalLen = 20 + jpegLen;
+                const packet = new Uint8Array(totalLen);
+
+                // 'FRM1' (0x46524D31)
+                packet[0] = 0x46; packet[1] = 0x52; packet[2] = 0x4D; packet[3] = 0x31;
+                const view = new DataView(packet.buffer);
+                frontendFrameSeq = (frontendFrameSeq + 1) >>> 0;
+                view.setUint32(4, frontendFrameSeq, false);
+                view.setFloat64(8, performance.now(), false);
+                view.setUint32(16, jpegLen, false);
+
+                packet.set(new Uint8Array(jpegBuffer), 20);
+                cvSocket.send(packet.buffer);
+            }, "image/jpeg", 0.70);
+        } catch (e) {
+            console.debug("[CV Frontend Camera] Frame capture skipped:", e);
+        }
+    }, 66);
+}
+
+function renderFrontendPreviewLoop(now) {
+    if (!isFrontendCameraActive) return;
+
+    // Measure local preview FPS
+    previewFrameCount++;
+    if (now - lastPreviewFPSCheck >= 1000) {
+        measuredPreviewFPS = Math.round((previewFrameCount * 1000) / (now - lastPreviewFPSCheck));
+        previewFrameCount = 0;
+        lastPreviewFPSCheck = now;
+    }
+
+    const canvas = document.getElementById("cvCanvas");
+    if (canvas && frontendVideoElement && frontendVideoElement.readyState >= 2) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+            if (canvas.width !== 640 || canvas.height !== 480) {
+                canvas.width = 640;
+                canvas.height = 480;
+            }
+
+            // Draw local video with selfie mirroring
+            ctx.save();
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            ctx.drawImage(frontendVideoElement, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
+
+            // Expire stale overlays older than 1.0s
+            let currentMeta = null;
+            if (latestCVMetadata && (now - lastMetadataReceivedTime <= 1000)) {
+                currentMeta = latestCVMetadata;
+            }
+
+            renderCVOverlayCanvas(ctx, canvas.width, canvas.height, currentMeta, true);
+        }
+    }
+
+    requestAnimationFrame(renderFrontendPreviewLoop);
+}
+
+window.addEventListener("beforeunload", stopFrontendCamera);
+
+function updateCVBadge(connected) {
+    const badge = document.getElementById("cvStatusBadge");
+    if (!badge) return;
+    if (connected) {
+        badge.className = "cv-badge connected";
+        badge.textContent = "Live";
+    } else {
+        badge.className = "cv-badge disconnected";
+        badge.textContent = "Disconnected";
+    }
+}
+
+function updateCVPlaceholder(show, message = "") {
+    const ph = document.getElementById("cvPlaceholder");
+    if (!ph) return;
+    ph.style.display = show ? "flex" : "none";
+    if (message) {
+        const textEl = ph.querySelector("div:nth-child(2)");
+        if (textEl) textEl.textContent = message;
+    }
+}
+
+function initCVConnection() {
+    if (cvSocket && (cvSocket.readyState === WebSocket.OPEN || cvSocket.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
+    try {
+        cvSocket = new WebSocket(CV_WS_URL);
+        cvSocket.binaryType = "arraybuffer";
+
+        cvSocket.onopen = () => {
+            console.log("[CV] Connected to CV adapter WebSocket at", CV_WS_URL);
+            updateCVBadge(true);
+            updateCVPlaceholder(false);
+            startFrontendCamera();
+        };
+
+        cvSocket.onmessage = async (event) => {
+            if (event.data instanceof ArrayBuffer) {
+                // Backend camera fallback stream (if frontend camera not running)
+                if (!isFrontendCameraActive) {
+                    await handleCVBinaryFrame(event.data);
+                }
+            } else if (typeof event.data === "string") {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === "frame" || data.type === "frame_metadata") {
+                        latestCVMetadata = data;
+                        lastMetadataReceivedTime = performance.now();
+                        if (data.timestamp) {
+                            const tsMs = data.timestamp > 1e11 ? data.timestamp : data.timestamp * 1000;
+                            measuredInferenceLatencyMs = Math.max(0, Math.round(performance.now() - tsMs));
+                        }
+                        if (!isFrontendCameraActive) {
+                            const canvas = document.getElementById("cvCanvas");
+                            if (canvas) {
+                                const ctx = canvas.getContext("2d");
+                                if (ctx) renderCVOverlayCanvas(ctx, canvas.width, canvas.height, data, false);
+                            }
+                        }
+                    } else {
+                        handleCVEvent(data);
+                    }
+                } catch (err) {
+                    console.error("[CV] Failed to parse JSON event:", err);
+                }
+            }
+        };
+
+        cvSocket.onclose = () => {
+            updateCVBadge(false);
+            updateCVPlaceholder(true, "Connecting to CV feed...");
+            clearTimeout(cvReconnectTimer);
+            cvReconnectTimer = setTimeout(initCVConnection, 2000);
+        };
+
+        cvSocket.onerror = (err) => {
+            console.warn("[CV] WebSocket connection error:", err);
+            cvSocket.close();
+        };
+    } catch (e) {
+        console.error("[CV] Failed to create WebSocket:", e);
+        clearTimeout(cvReconnectTimer);
+        cvReconnectTimer = setTimeout(initCVConnection, 3000);
+    }
+}
+
+async function handleCVBinaryFrame(arrayBuffer) {
+    if (arrayBuffer.byteLength < 4) return;
+    const view = new DataView(arrayBuffer);
+    const jsonLen = view.getUint32(0, false); // big-endian uint32
+    if (arrayBuffer.byteLength < 4 + jsonLen) return;
+
+    const jsonBytes = new Uint8Array(arrayBuffer, 4, jsonLen);
+    const metaStr = new TextDecoder("utf-8").decode(jsonBytes);
+    let metadata;
+    try {
+        metadata = JSON.parse(metaStr);
+        window.lastCVMetadata = metadata;
+    } catch (err) {
+        return;
+    }
+
+    const jpegBytes = new Uint8Array(arrayBuffer, 4 + jsonLen);
+    const blob = new Blob([jpegBytes], { type: "image/jpeg" });
+
+    try {
+        const imageBitmap = await createImageBitmap(blob);
+        renderCVFrame(imageBitmap, metadata);
+    } catch (err) {
+        console.debug("[CV] Frame decode skipped:", err);
+    }
+}
+
+
+/**
+ * --------------------------------------------------------------------------
+ * Real-Time Action Mirroring Engine
+ * --------------------------------------------------------------------------
+ */
+let currentMirroredAction = null;
+let actionDebounceTimer = null;
+
+function syncActionMirroring(people) {
+    if (!head) return;
+
+    // Detect action of primary person or first person with an action
+    let activeAction = null;
+    if (people && people.length > 0) {
+        for (const p of people) {
+            if (p.actions && p.actions.length > 0) {
+                activeAction = p.actions[0];
+                break;
+            }
+        }
+    }
+
+    if (activeAction) {
+        // Clear any pending debounce to lower the arm
+        if (actionDebounceTimer) {
+            clearTimeout(actionDebounceTimer);
+            actionDebounceTimer = null;
+        }
+
+        if (currentMirroredAction === activeAction) {
+            return; // Continuously holding current mirrored action
+        }
+
+        console.log(`[ActionMirror] Starting mirror: ${activeAction}`);
+        currentMirroredAction = activeAction;
+
+        if (activeAction === "hand_raised") {
+            stopActiveWave(head);
+            head.playGesture("handup", null, true, 400);
+            head.setMood("neutral");
+            setStatus("Mirroring: Hand Raised ✋");
+        } else if (activeAction === "waving") {
+            stopActiveWave(head);
+            head.playGesture("handup", null, true, 400);
+            head.setMood("happy");
+            setStatus("Mirroring: Waving 👋");
+
+            function animateContinuousWave() {
+                if (currentMirroredAction !== "waving") return;
+                const now = performance.now();
+                const angle = Math.sin((now / 1000) * Math.PI * 4.5) * 0.36;
+                if (head.poseDelta && head.poseDelta.props) {
+                    head.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: angle };
+                    head.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: angle * 0.75 };
+                }
+                activeWaveFrame = requestAnimationFrame(animateContinuousWave);
+            }
+            activeWaveFrame = requestAnimationFrame(animateContinuousWave);
+        } else if (activeAction === "thumbs_up") {
+            stopActiveWave(head);
+            head.playGesture("thumbup", null, true, 400);
+            head.setMood("happy");
+            setStatus("Mirroring: Thumbs Up 👍");
+        } else if (activeAction === "namaste") {
+            stopActiveWave(head);
+            head.playGesture("namaste", null, false, 500);
+            head.setMood("neutral");
+            setStatus("Mirroring: Namaste 🙏");
+        } else if (activeAction === "victory") {
+            stopActiveWave(head);
+            head.playGesture("handup", null, true, 400);
+            head.setMood("happy");
+            setStatus("Mirroring: Victory ✌️");
+        }
+    } else {
+        // No active action on current frame
+        if (currentMirroredAction !== null) {
+            if (!actionDebounceTimer) {
+                actionDebounceTimer = setTimeout(() => {
+                    console.log(`[ActionMirror] Lowering hand / ending: ${currentMirroredAction}`);
+                    currentMirroredAction = null;
+                    stopActiveWave(head);
+                    if (head) {
+                        try {
+                            head.stopGesture(400);
+                            if (head.poseCurrentTemplate && typeof head.setPoseFromTemplate === "function") {
+                                head.setPoseFromTemplate(head.poseCurrentTemplate, 500);
+                            }
+                            head.setMood("neutral");
+                        } catch (err) {
+                            console.debug("[ActionMirror] Gesture stop warning:", err);
+                        }
+                    }
+                    setStatus("Idle");
+                    actionDebounceTimer = null;
+                }, 250);
+            }
+        }
+    }
+}
+
+function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = false) {
+    if (!metadata) return;
+    const people = metadata.people || [];
+    let activeAction = "None";
+
+    // Real-time action mirroring
+    syncActionMirroring(people);
+
+    people.forEach((p) => {
+        if (!p.bbox || p.bbox.length < 4) return;
+        const [x1, y1, x2, y2] = p.bbox;
+        const w = x2 - x1;
+        const h = y2 - y1;
+
+        // Coordinate transformation for mirrored selfie camera
+        const drawX = isMirrored ? (canvasW - x2) : x1;
+        const drawY = y1;
+
+        const isKnown = p.display_name && p.display_name !== "Unknown";
+        const primaryColor = isKnown ? "#22c55e" : "#00f0ff";
+
+        // Bounding Box
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(drawX, drawY, w, h);
+
+        // Name & Track Label
+        const nameText = isKnown ? p.display_name : "Unknown";
+        const idText = `#t${p.track_id}`;
+        let actionBadge = "";
+        if (p.actions && p.actions.length > 0) {
+            actionBadge = ` • [${p.actions.join(", ")}]`;
+            activeAction = p.actions.join(", ");
+        }
+        const label = `${nameText} (${idText})${actionBadge}`;
+
+        ctx.font = "bold 13px Inter, sans-serif";
+        const textWidth = ctx.measureText(label).width;
+        const labelH = 22;
+        const labelW = textWidth + 14;
+        const labelX = Math.max(0, drawX);
+        const labelY = Math.max(0, drawY - labelH);
+
+        ctx.fillStyle = isKnown ? "rgba(34, 197, 94, 0.9)" : "rgba(0, 0, 0, 0.75)";
+        ctx.fillRect(labelX, labelY, labelW, labelH);
+
+        ctx.fillStyle = isKnown ? "#ffffff" : primaryColor;
+        ctx.fillText(label, labelX + 7, labelY + 15);
+    });
+
+    // Draw detected objects
+    const objects = metadata.objects || [];
+    objects.forEach((obj) => {
+        if (!obj.bbox || obj.bbox.length < 4) return;
+        const [x1, y1, x2, y2] = obj.bbox;
+        const w = x2 - x1;
+        const h = y2 - y1;
+        const drawX = isMirrored ? (canvasW - x2) : x1;
+
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(drawX, y1, w, h);
+        ctx.fillStyle = "rgba(245, 158, 11, 0.85)";
+        const label = `${obj.label} (${Math.round(obj.confidence * 100)}%)`;
+        ctx.fillRect(drawX, Math.max(0, y1 - 20), ctx.measureText(label).width + 8, 20);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(label, drawX + 4, Math.max(0, y1 - 6));
+    });
+
+    // Update Info Bar
+    const peopleCountEl = document.getElementById("cvPeopleCount");
+    if (peopleCountEl) peopleCountEl.textContent = `👥 People: ${people.length}`;
+    const actionBadgeEl = document.getElementById("cvActionBadge");
+    if (actionBadgeEl) actionBadgeEl.textContent = `⚡ Action: ${activeAction}`;
+
+    const badge = document.getElementById("cvStatusBadge");
+    if (badge && isFrontendCameraActive) {
+        badge.textContent = `Live (${measuredPreviewFPS} FPS | ${measuredInferenceLatencyMs}ms)`;
+    }
+
+    // Update Track List cards
+    updateTrackListUI(people);
+}
+
+function renderCVFrame(imgBitmap, metadata) {
+    window.lastCVMetadata = metadata;
+    const canvas = document.getElementById("cvCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    if (canvas.width !== imgBitmap.width || canvas.height !== imgBitmap.height) {
+        canvas.width = imgBitmap.width;
+        canvas.height = imgBitmap.height;
+    }
+
+    // Draw camera image
+    ctx.drawImage(imgBitmap, 0, 0);
+
+    // Render overlays
+    renderCVOverlayCanvas(ctx, canvas.width, canvas.height, metadata, false);
+}
+
+function updateTrackListUI(people) {
+    const listEl = document.getElementById("cvTrackList");
+    if (!listEl) return;
+    if (!people || people.length === 0) {
+        listEl.innerHTML = `<div style="color: #6b7280; font-size: 12px; text-align: center; padding: 6px;">No persons currently tracked</div>`;
+        return;
+    }
+    listEl.innerHTML = people.map(p => {
+        const isKnown = p.display_name && p.display_name !== "Unknown";
+        const name = isKnown ? p.display_name : "Unknown Person";
+        const action = p.actions && p.actions.length ? p.actions.join(", ") : "Idle";
+        return `
+            <div class="track-card ${isKnown ? "known" : ""}">
+                <div>
+                    <div class="track-name">${name}</div>
+                    <div class="track-sub">Track ID: #${p.track_id} ${p.person_id ? `• ${p.person_id.substring(0, 8)}...` : ""}</div>
+                </div>
+                <div class="info-pill" style="font-size: 11px;">${action}</div>
+            </div>
+        `;
+    }).join("");
+}
+
+function forwardTranscriptToCV(text) {
+    if (cvSocket && cvSocket.readyState === WebSocket.OPEN) {
+        cvSocket.send(JSON.stringify({
+            type: "transcript",
+            text: text,
+        }));
+    }
+}
+
+function handleCVEvent(event) {
+    if (!event || !event.event_type) return;
+
+    if (event.event_type === "action_detected") {
+        handleActionDetected(event);
+    } else if (event.event_type === "action_ended") {
+        handleActionEnded(event);
+    } else if (event.event_type === "person_renamed") {
+        appendTranscriptUI("avatar", `👋 Pleased to meet you, ${event.new_name}!`);
+        setStatus(`Renamed track to ${event.new_name}`);
+    } else if (event.event_type === "person_identified") {
+        if (event.display_name && event.display_name !== "Unknown") {
+            setStatus(`Identified: ${event.display_name}`);
+        }
+    }
+}
+
+function handleActionDetected(event) {
+    console.log(`[CV] Action detected: ${event.action} from track #${event.track_id}`);
+    if (event.action === "hand_raised") {
+        avatarController.setState(AvatarState.LISTENING);
+        setStatus("Hand raised ✋ — listening...");
+    }
+}
+
+function handleActionEnded(event) {
+    console.log(`[CV] Action ended: ${event.action} from track #${event.track_id}`);
+}
+
+/**
+ * --------------------------------------------------------------------------
  * Application bootstrap
  * --------------------------------------------------------------------------
  */
@@ -1293,6 +1984,8 @@ async function bootstrap() {
         registerEventHandlers();
 
         pushToTalk.attach();
+
+        initCVConnection();
 
         await initializeAvatar();
 

@@ -4720,11 +4720,17 @@ class TalkingHead {
       const gs = Object.entries(this.gesture);
       this.gesture = null;
       for( const [p,val] of gs ) {
-        if ( this.poseTarget.props.hasOwnProperty(p) ) {
-          this.poseTarget.props[p].copy( this.getPoseTemplateProp(p) );
-          this.poseTarget.props[p].t = this.animClock;
-          this.poseTarget.props[p].d = ms;
+        if ( this.poseTarget && this.poseTarget.props && this.poseTarget.props.hasOwnProperty(p) ) {
+          const targetVal = this.getPoseTemplateProp(p);
+          if ( targetVal ) {
+            this.poseTarget.props[p].copy( targetVal );
+            this.poseTarget.props[p].t = this.animClock;
+            this.poseTarget.props[p].d = ms;
+          }
         }
+      }
+      if ( this.poseCurrentTemplate && typeof this.setPoseFromTemplate === "function" ) {
+        this.setPoseFromTemplate( this.poseCurrentTemplate, ms );
       }
     }
 

@@ -1,0 +1,10 @@
+{
+  "include": [
+    "."
+  ],
+  "extraPaths": [
+    ".",
+    "supertonic/py",
+    "../../cv/src"
+  ]
+}

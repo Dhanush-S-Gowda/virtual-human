@@ -1,0 +1,15 @@
+# Core dependencies for CV Assistant
+# PyTorch with CUDA (install via index-url for GPU support):
+#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+ultralytics>=8.3.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+scipy>=1.12.0
+PyYAML>=6.0
+websockets>=13.0
+pydantic>=2.0
+pytest>=8.0
+pytest-asyncio>=0.24
+onnxruntime-gpu>=1.18.0
+insightface>=0.7.3

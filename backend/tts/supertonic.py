@@ -37,7 +37,12 @@ def _load_model():
     if "CUDAExecutionProvider" in available:
         providers.append("CUDAExecutionProvider")
     if "OpenVINOExecutionProvider" in available:
-        providers.append(("OpenVINOExecutionProvider", {"device_type": "GPU"}))
+        try:
+            import ctypes
+            ctypes.cdll.LoadLibrary("openvino.dll")
+            providers.append(("OpenVINOExecutionProvider", {"device_type": "GPU"}))
+        except Exception:
+            pass
     providers.append("CPUExecutionProvider")
 
     options = ort.SessionOptions()
@@ -113,7 +118,7 @@ def _synthesize(text: str, voice: str, speed: float) -> SynthesizeResponse:
     model = _load_model()
     style = _load_style(str(style_path))
     language = settings.tts_language
-    steps = int(settings.tts_supertonic_steps)
+    steps = max(int(settings.tts_supertonic_steps), 5)
 
     audio_batch, durations = model(text, language, style, steps, speed)
 
@@ -126,10 +131,11 @@ def _synthesize(text: str, voice: str, speed: float) -> SynthesizeResponse:
     if not np.isfinite(audio).all():
         raise ValueError("Supertonic returned non-finite audio samples.")
 
-    # Normalize each streamed segment to -1 dBFS without clipping.
+    # Protect against clipping while maintaining punchy speech levels without loudness pumping
     peak = float(np.max(np.abs(audio)))
     if peak > 0:
-        audio *= (10 ** (-1 / 20)) / peak
+        gain = min(2.2, 0.92 / peak)
+        audio = audio * gain
 
     wav = BytesIO()
     sf.write(wav, audio, model.sample_rate, format="WAV", subtype="PCM_16")

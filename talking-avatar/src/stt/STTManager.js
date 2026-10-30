@@ -84,6 +84,7 @@ export class STTManager {
                 type: "start",
                 session_id: this.sessionId,
                 mime_type: this.mediaRecorder.mimeType || this.supportedMimeType || "audio/webm",
+                client_scene: (typeof window !== "undefined" && window.lastCVMetadata) ? window.lastCVMetadata : null,
             }));
             this.mediaRecorder.start(250);
             this.setState(STTState.LISTENING);
@@ -109,7 +110,10 @@ export class STTManager {
                 this.mediaRecorder = null;
                 this._stopTracks();
                 if (this.socket?.readyState === WebSocket.OPEN) {
-                    this.socket.send(JSON.stringify({ type: "end" }));
+                    this.socket.send(JSON.stringify({
+                        type: "end",
+                        client_scene: (typeof window !== "undefined" && window.lastCVMetadata) ? window.lastCVMetadata : null,
+                    }));
                     this.setState(STTState.TRANSCRIBING);
                     resolve(true);
                 } else {
