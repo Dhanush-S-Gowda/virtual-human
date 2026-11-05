@@ -3211,6 +3211,7 @@ class TalkingHead {
     if ( r.audio ) {
       o.audio = r.audio;
     }
+    if ( typeof r.onAudioStart === 'function' ) o.onAudioStart = r.onAudioStart;
 
     // Blend shapes animation
     if (r.anim?.name) {
@@ -3312,7 +3313,9 @@ class TalkingHead {
       }
 
       // Play, delay in seconds so pre-animations can be played
-      source.start( this.audioCtx.currentTime + delay/1000);
+      const scheduledStart = this.audioCtx.currentTime + delay/1000;
+      source.start(scheduledStart);
+      item.onAudioStart?.(scheduledStart, source.playbackRate.value, audio.duration);
 
     } else {
       this.isAudioPlaying = false;
@@ -3353,7 +3356,8 @@ class TalkingHead {
         }
 
         // Make a playlist
-        this.audioPlaylist.push({ anim: line.anim, audio: line.audio, isRaw: line.isRaw });
+        this.audioPlaylist.push({ anim: line.anim, audio: line.audio, isRaw: line.isRaw,
+          onAudioStart: line.onAudioStart });
         this.onSubtitles = line.onSubtitles || null;
         if ( line.mood ) this.setMood( line.mood );
         this.playAudio();
@@ -4371,11 +4375,12 @@ class TalkingHead {
   * @param {number} [ndx=0] Index of the clip
   * @param {number} [scale=0.01] Position scale factor
   */
-  async playAnimation(url, onprogress=null, dur=10, ndx=0, scale=0.01) {
-    if ( !this.armature ) return;
+  async playAnimation(url, onprogress=null, dur=10, ndx=0, scale=0.01, signal=null, preload=false, armsOnly=false) {
+    if ( !this.armature || signal?.aborted ) return;
 
     let item = this.animClips.find( x => x.url === url+'-'+ndx );
     if ( item ) {
+      if ( preload ) return item;
 
       // Reset pose update
       let anim = this.animQueue.find( x => x.template.name === 'pose' );
@@ -4385,6 +4390,7 @@ class TalkingHead {
 
       // Set new pose
       Object.entries(item.pose.props).forEach( x => {
+        if ( armsOnly && !/^(Left|Right)(Shoulder|Arm|ForeArm|Hand)/.test(x[0]) ) return;
         this.poseBase.props[x[0]] = x[1].clone();
         this.poseTarget.props[x[0]] = x[1].clone();
         this.poseTarget.props[x[0]].t = 0;
@@ -4408,7 +4414,9 @@ class TalkingHead {
 
       // Play action
       const repeat = Math.ceil(dur / item.clip.duration);
-      const action = this.mixer.clipAction(item.clip);
+      const clip = armsOnly ? new THREE.AnimationClip(item.clip.name, item.clip.duration,
+        item.clip.tracks.filter(track => /^(Left|Right)(Shoulder|Arm|ForeArm|Hand)/.test(track.name))) : item.clip;
+      const action = this.mixer.clipAction(clip);
       action.setLoop( THREE.LoopRepeat, repeat );
       action.clampWhenFinished = true;
       action.fadeIn(0.5).play();
@@ -4419,6 +4427,7 @@ class TalkingHead {
       const loader = new FBXLoader();
 
       let fbx = await loader.loadAsync( url, onprogress );
+      if ( signal?.aborted ) return;
 
       if ( fbx && fbx.animations && fbx.animations[ndx] ) {
         let anim = fbx.animations[ndx];
@@ -4457,7 +4466,7 @@ class TalkingHead {
         });
 
         // Play
-        this.playAnimation(url, onprogress, dur, ndx, scale);
+        return this.playAnimation(url, onprogress, dur, ndx, scale, signal, preload, armsOnly);
 
       } else {
         const msg = 'Animation ' + url + ' (ndx=' + ndx + ') not found';

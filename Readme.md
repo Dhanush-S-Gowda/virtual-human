@@ -84,9 +84,10 @@ the backend starts. For another OpenAI-compatible provider, set `llm_url`,
 
 ### TTS
 
-Supertonic is the default and runs in the backend process. Set
-`tts_provider: supertonic`; choose a Supertonic voice style such as `F1` or
-`F2`. The model assets must be present from setup.
+To run Supertonic in the backend process, set `tts_provider: supertonic`.
+Choose `F1` or `M1` in the frontend Settings dialog. Model assets must be
+present from setup. Provider selection stays in YAML; voice selection is saved
+in the browser and sent with each recording.
 
 To use the Kokoro service instead, pull the Docker image:
 
@@ -99,9 +100,9 @@ And configure:
 ```yaml
 tts_provider: kokoro
 tts_url: http://kokoro:8880
-tts_voice: af_bella
 ```
 
+For Kokoro, frontend Settings offers `am_puck` and `af_heart`.
 Kokoro returns word timings for lip synchronization. Supertonic returns
 approximate word timings distributed across the generated audio. The Compose
 Kokoro service is started with the stack and reports ready before the backend
@@ -205,3 +206,9 @@ For direct host execution, update provider URLs in `config.yaml` to host-local
 addresses (for example, `http://localhost:8880` for Kokoro). The API listens on
 port 8000 by default. The browser frontend is built separately by its
 `talking-avatar` service.
+
+## Computer vision
+
+The independent CV service and its provider modules are in `backend/cv/`.
+See [CV setup and window protocol](backend/README.md#independent-cv-process)
+for installation, global configuration, startup, tests, and benchmarks.

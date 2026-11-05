@@ -1,0 +1,9 @@
+[
+  {
+    "date": "2026-11-01",
+    "macrostructure": "Call stage (user specified)",
+    "theme": "Existing dark/blue app theme",
+    "enrichment": "Existing live avatar and camera only",
+    "brief": "Center avatar, compact upper-right preview, collapsed details, temporary event overlays"
+  }
+]

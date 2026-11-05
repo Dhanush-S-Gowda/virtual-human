@@ -5,6 +5,6 @@
   "extraPaths": [
     ".",
     "supertonic/py",
-    "../../cv/src"
+    ".."
   ]
 }

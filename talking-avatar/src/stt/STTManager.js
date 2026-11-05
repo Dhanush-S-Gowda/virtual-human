@@ -1,5 +1,7 @@
 /** Capture microphone audio and send chunks to the conversation websocket. */
 
+import { tabSessionId } from "./session.js";
+
 export const STTState = {
     IDLE: "IDLE",
     LISTENING: "LISTENING",
@@ -16,18 +18,20 @@ export class STTManager {
         this.onTranscript = options.onTranscript || (() => {});
         this.onError = options.onError || (() => {});
         this.onEvent = options.onEvent || (() => {});
+        this.onAudioActivity = options.onAudioActivity || (() => {});
+        this.onCaptureEnd = options.onCaptureEnd || (() => {});
+        this.onCaptureStart = options.onCaptureStart || (() => {});
+        this.getContext = options.getContext || (() => ({}));
+        this.getStartOptions = options.getStartOptions || (() => ({}));
         this.state = STTState.IDLE;
-        this.mediaRecorder = null;
+        this.audioContext = null;
+        this.captureNode = null;
+        this.sourceNode = null;
         this.stream = null;
         this.socket = null;
-        this.sessionId = crypto.randomUUID();
-        this.supportedMimeType = this._detectSupportedMimeType();
-    }
-
-    _detectSupportedMimeType() {
-        if (typeof MediaRecorder === "undefined") return "";
-        return ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]
-            .find((type) => MediaRecorder.isTypeSupported(type)) || "";
+        this.sessionId = options.sessionId || tabSessionId();
+        this.starting = false;
+        this.captureGeneration = 0;
     }
 
     setState(state, detail = null) {
@@ -36,32 +40,53 @@ export class STTManager {
     }
 
     isRecording() {
-        return this.state === STTState.LISTENING && this.mediaRecorder?.state === "recording";
+        return this.state === STTState.LISTENING && this.captureNode !== null;
     }
 
     async startRecording() {
-        if (this.isRecording()) return false;
+        if (this.isRecording() || this.starting) return false;
+        this.starting = true;
+        const generation = ++this.captureGeneration;
         try {
+            const startOptions = await this.getStartOptions();
+            if (generation !== this.captureGeneration) return false;
             if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+                this.socket.onclose = this.socket.onmessage = null;
                 if (this.socket.readyState === WebSocket.OPEN) {
                     this.socket.send(JSON.stringify({ type: "cancel" }));
                 }
                 this.socket.close();
             }
-            this.stream = await navigator.mediaDevices.getUserMedia({
+            const stream = await navigator.mediaDevices.getUserMedia({
                 audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             });
+            if (generation !== this.captureGeneration) {
+                stream.getTracks().forEach((track) => track.stop());
+                return false;
+            }
+            this.stream = stream;
             this.socket = new WebSocket(this.websocketUrl);
+            const socket = this.socket;
             await new Promise((resolve, reject) => {
-                this.socket.onopen = resolve;
-                this.socket.onerror = () => reject(new Error("Cannot reach the conversation backend."));
+                const timer = setTimeout(() => {
+                    socket.close();
+                    reject(new Error("Cannot reach the conversation backend."));
+                }, 10000);
+                socket.onopen = () => { clearTimeout(timer); resolve(); };
+                socket.onerror = socket.onclose = () => {
+                    clearTimeout(timer);
+                    reject(new Error("Cannot reach the conversation backend."));
+                };
             });
-            this.socket.onmessage = ({ data }) => {
+            if (generation !== this.captureGeneration) return false;
+            socket.onmessage = ({ data }) => {
+                if (this.socket !== socket) return;
                 try {
                     const event = JSON.parse(data);
                     this.onEvent(event);
                     if (event.type === "transcript") this.onTranscript(event);
                     if (event.type === "error") {
+                        this._stopCapture();
                         this.setState(STTState.ERROR, event.message);
                         this.onError(event.message || "Conversation failed.");
                     }
@@ -70,26 +95,49 @@ export class STTManager {
                     console.error("Invalid conversation event:", error);
                 }
             };
-            this.socket.onclose = () => {
+            socket.onclose = () => {
+                if (this.socket !== socket) return;
+                if (this.isRecording()) {
+                    this._stopCapture();
+                    this.setState(STTState.ERROR, "Conversation connection closed while recording.");
+                }
                 if (this.state === STTState.TRANSCRIBING) this.setState(STTState.READY);
             };
-            this.mediaRecorder = new MediaRecorder(
-                this.stream,
-                this.supportedMimeType ? { mimeType: this.supportedMimeType } : undefined,
-            );
-            this.mediaRecorder.ondataavailable = ({ data }) => {
-                if (data.size && this.socket?.readyState === WebSocket.OPEN) this.socket.send(data);
+            this.audioContext = new AudioContext({ sampleRate: 16000 });
+            await this.audioContext.audioWorklet.addModule(new URL("./pcm-worklet.js", import.meta.url));
+            if (generation !== this.captureGeneration) return false;
+            await this.audioContext.resume();
+            if (generation !== this.captureGeneration) return false;
+            this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
+            this.captureNode = new AudioWorkletNode(this.audioContext, "pcm-capture");
+            this.captureNode.port.onmessage = ({ data }) => {
+                if (data.buffer && this.socket?.readyState === WebSocket.OPEN) {
+                    if (this.socket.bufferedAmount > 1024 * 1024) {
+                        this.cancelRecording();
+                        this.setState(STTState.ERROR, "Audio connection is too slow. Please try again.");
+                        return;
+                    }
+                    this.socket.send(data.buffer);
+                    this.onAudioActivity({ rms: data.rms,
+                        timestamp: performance.now() - data.durationMs / 2 });
+                }
+                if (data.stopped) this.captureStopped?.();
             };
             this.socket.send(JSON.stringify({
+                ...startOptions,
                 type: "start",
                 session_id: this.sessionId,
-                mime_type: this.mediaRecorder.mimeType || this.supportedMimeType || "audio/webm",
-                client_scene: (typeof window !== "undefined" && window.lastCVMetadata) ? window.lastCVMetadata : null,
+                mime_type: "audio/pcm",
+                sample_rate: this.audioContext.sampleRate,
             }));
-            this.mediaRecorder.start(250);
+            this.sourceNode.connect(this.captureNode);
+            // The worklet outputs silence; connecting it keeps audio processing active.
+            this.captureNode.connect(this.audioContext.destination);
             this.setState(STTState.LISTENING);
+            this.onCaptureStart();
             return true;
         } catch (error) {
+            if (generation !== this.captureGeneration) return false;
             this._cleanup();
             const message = error.name === "NotAllowedError"
                 ? "Microphone permission is required to talk to the avatar."
@@ -99,35 +147,41 @@ export class STTManager {
             this.setState(STTState.ERROR, message);
             this.onError(message);
             return false;
+        } finally {
+            if (generation === this.captureGeneration) this.starting = false;
         }
     }
 
     async stopRecording() {
-        if (!this.mediaRecorder) return false;
-        return new Promise((resolve) => {
-            const recorder = this.mediaRecorder;
-            recorder.onstop = () => {
-                this.mediaRecorder = null;
-                this._stopTracks();
-                if (this.socket?.readyState === WebSocket.OPEN) {
-                    this.socket.send(JSON.stringify({
-                        type: "end",
-                        client_scene: (typeof window !== "undefined" && window.lastCVMetadata) ? window.lastCVMetadata : null,
-                    }));
-                    this.setState(STTState.TRANSCRIBING);
-                    resolve(true);
-                } else {
-                    resolve(false);
-                }
-            };
-            recorder.stop();
-        });
+        if (this.starting) {
+            this.cancelRecording();
+            return false;
+        }
+        if (!this.isRecording()) return false;
+        this.setState(STTState.TRANSCRIBING);
+        try {
+            await new Promise((resolve, reject) => {
+                this.captureStopped = resolve;
+                this.captureNode.port.postMessage("stop");
+                this.flushTimer = setTimeout(() => reject(new Error("Audio capture did not stop.")), 2000);
+            });
+            if (this.socket?.readyState !== WebSocket.OPEN) return false;
+            this.socket.send(JSON.stringify({ type: "end", ...this.getContext() }));
+            return true;
+        } catch (error) {
+            this.cancelRecording();
+            this.setState(STTState.ERROR, error.message);
+            this.onError(error.message);
+            return false;
+        } finally {
+            this._stopCapture();
+        }
     }
 
     cancelRecording() {
+        this.captureGeneration++;
+        this.starting = false;
         if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: "cancel" }));
-        this.mediaRecorder?.stop();
-        this.mediaRecorder = null;
         this.socket?.close();
         this.socket = null;
         this._cleanup();
@@ -139,9 +193,22 @@ export class STTManager {
         this.stream = null;
     }
 
-    _cleanup() {
+    _stopCapture() {
+        clearTimeout(this.flushTimer);
+        this.captureStopped?.();
+        this.captureStopped = null;
+        if (this.captureNode) this.captureNode.port.onmessage = null;
+        this.captureNode?.disconnect();
+        this.sourceNode?.disconnect();
+        this.captureNode = this.sourceNode = null;
+        this.audioContext?.close().catch(() => {});
+        this.audioContext = null;
         this._stopTracks();
-        this.mediaRecorder = null;
+        this.onCaptureEnd();
+    }
+
+    _cleanup() {
+        this._stopCapture();
         this.socket?.close();
         this.socket = null;
     }

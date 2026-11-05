@@ -1,706 +1,97 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    />
-
-    <title>Local TalkingHead Avatar</title>
-
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        html,
-        body {
-            width: 100%;
-            height: 100%;
-            margin: 0;
-
-            overflow: hidden;
-
-            font-family:
-                Inter,
-                system-ui,
-                -apple-system,
-                BlinkMacSystemFont,
-                "Segoe UI",
-                sans-serif;
-
-            background: #111;
-        }
-
-        #app {
-            position: relative;
-
-            width: 100%;
-            height: 100%;
-        }
-
-        /*
-         * TalkingHead renders the Three.js scene here.
-         */
-        #avatar {
-            position: absolute;
-
-            inset: 0;
-
-            width: 100%;
-            height: 100%;
-        }
-
-        /*
-         * Status indicator.
-         */
-        #status {
-            position: absolute;
-
-            top: 20px;
-            left: 20px;
-
-            z-index: 10;
-
-            padding: 8px 12px;
-
-            border-radius: 8px;
-
-            background: rgba(0, 0, 0, 0.65);
-
-            color: white;
-
-            font-size: 14px;
-        }
-
-        /*
-         * Loading indicator.
-         */
-        #loading {
-            position: absolute;
-
-            left: 50%;
-            top: 50%;
-
-            transform: translate(-50%, -50%);
-
-            z-index: 20;
-
-            color: white;
-
-            font-size: 18px;
-        }
-
-        /*
-         * Transcript display box.
-         */
-        #transcriptContainer {
-            position: absolute;
-
-            top: 20px;
-            right: 20px;
-
-            width: 340px;
-            max-width: calc(100% - 40px);
-
-            z-index: 10;
-
-            padding: 14px 16px;
-
-            border-radius: 12px;
-
-            background: rgba(0, 0, 0, 0.75);
-
-            backdrop-filter: blur(10px);
-
-            border: 1px solid rgba(255, 255, 255, 0.12);
-
-            color: white;
-
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-            transition: all 0.2s ease;
-        }
-
-        #transcriptHeader {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: #9ca3af;
-
-            margin-bottom: 8px;
-        }
-
-        #transcriptBody {
-            font-size: 14px;
-            line-height: 1.45;
-            color: #f3f4f6;
-            word-break: break-word;
-        }
-
-        .transcript-user {
-            color: #60a5fa;
-            font-weight: 600;
-            margin-bottom: 2px;
-        }
-
-        .transcript-text {
-            color: #f9fafb;
-            font-style: italic;
-        }
-
-        .transcript-error {
-            color: #f87171;
-        }
-
-        /*
-         * Push-to-talk visual indicator banner.
-         */
-        #pttBanner {
-            position: absolute;
-
-            bottom: 84px;
-            left: 50%;
-            transform: translateX(-50%);
-
-            z-index: 10;
-
-            display: flex;
-            align-items: center;
-            gap: 10px;
-
-            padding: 10px 22px;
-
-            border-radius: 30px;
-
-            background: rgba(0, 0, 0, 0.75);
-
-            backdrop-filter: blur(10px);
-
-            border: 1px solid rgba(255, 255, 255, 0.15);
-
-            color: white;
-
-            font-size: 14px;
-            font-weight: 500;
-
-            pointer-events: none;
-
-            user-select: none;
-
-            transition: all 0.2s ease;
-        }
-
-        #pttBanner.ptt-idle {
-            background: rgba(0, 0, 0, 0.75);
-            border-color: rgba(255, 255, 255, 0.15);
-        }
-
-        @keyframes ptt-pulse {
-            0% {
-                transform: translateX(-50%) scale(1);
-                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
-            }
-            70% {
-                transform: translateX(-50%) scale(1.03);
-                box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
-            }
-            100% {
-                transform: translateX(-50%) scale(1);
-                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
-            }
-        }
-
-        #pttBanner.ptt-listening {
-            background: rgba(220, 38, 38, 0.9);
-            border-color: #ef4444;
-            animation: ptt-pulse 1.4s infinite;
-        }
-
-        #pttBanner.ptt-transcribing {
-            background: rgba(217, 119, 6, 0.9);
-            border-color: #f59e0b;
-        }
-
-        #pttBanner.ptt-error {
-            background: rgba(185, 28, 28, 0.9);
-            border-color: #ef4444;
-        }
-
-        @keyframes ptt-thinking {
-            0%, 100% {
-                transform: translateX(-50%) scale(1);
-                box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7);
-            }
-            50% {
-                transform: translateX(-50%) scale(1.02);
-                box-shadow: 0 0 0 10px rgba(139, 92, 246, 0);
-            }
-        }
-
-        #pttBanner.ptt-thinking {
-            background: rgba(109, 40, 217, 0.9);
-            border-color: #8b5cf6;
-            animation: ptt-thinking 1.6s infinite;
-        }
-
-        /* Avatar reply in transcript */
-        .transcript-avatar {
-            color: #34d399;
-            font-weight: 600;
-            margin-bottom: 2px;
-            margin-top: 10px;
-        }
-
-        .transcript-reply {
-            color: #ecfdf5;
-        }
-
-        .transcript-thinking {
-            color: #a78bfa;
-            font-style: italic;
-        }
-
-        /*
-         * Bottom control panel.
-         */
-        #controls {
-            position: absolute;
-
-            left: 20px;
-            right: 20px;
-            bottom: 20px;
-
-            z-index: 10;
-
-            display: flex;
-
-            flex-wrap: wrap;
-
-            gap: 8px;
-
-            padding: 12px;
-
-            border-radius: 12px;
-
-            background: rgba(0, 0, 0, 0.75);
-
-            backdrop-filter: blur(10px);
-        }
-
-        #speechText {
-            flex: 1 1 300px;
-
-            min-width: 200px;
-
-            padding: 10px 12px;
-
-            border: 1px solid #555;
-
-            border-radius: 7px;
-
-            outline: none;
-
-            background: #222;
-
-            color: white;
-
-            font-size: 15px;
-        }
-
-        #controls button {
-            padding: 10px 14px;
-
-            border: none;
-
-            border-radius: 7px;
-
-            background: #333;
-
-            color: white;
-
-            cursor: pointer;
-
-            font-size: 14px;
-
-            transition:
-                background 0.15s ease,
-                transform 0.1s ease;
-        }
-
-        #controls button:hover {
-            background: #444;
-        }
-
-        #controls button:active {
-            transform: scale(0.97);
-        }
-
-        #controls button.primary {
-            background: #2563eb;
-        }
-
-        #controls button.primary:hover {
-            background: #1d4ed8;
-        }
-
-        #controls button.danger {
-            background: #991b1b;
-        }
-
-        #mainLayout {
-            display: flex;
-            flex-direction: row;
-            width: 100%;
-            height: 100%;
-            position: relative;
-            overflow: hidden;
-            background: #0f1117;
-        }
-
-        #leftPanel {
-            flex: 1;
-            min-width: 0;
-            height: 100%;
-            background: #0b0d13;
-            border-right: 1px solid rgba(255, 255, 255, 0.1);
-            display: flex;
-            flex-direction: column;
-            padding: 16px;
-            gap: 12px;
-            box-sizing: border-box;
-            overflow-y: auto;
-            z-index: 5;
-        }
-
-        #rightPanel {
-            flex: 1;
-            min-width: 0;
-            height: 100%;
-            position: relative;
-            overflow: hidden;
-            background: #111;
-        }
-
-        #cvHeader {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding-bottom: 6px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .cv-title-group {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .live-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #ef4444;
-            animation: live-pulse 1.5s infinite;
-        }
-
-        @keyframes live-pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(1.3); }
-        }
-
-        .cv-title {
-            font-size: 14px;
-            font-weight: 600;
-            letter-spacing: 0.04em;
-            color: #f3f4f6;
-            text-transform: uppercase;
-        }
-
-        .cv-badge {
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .cv-badge.connected {
-            background: rgba(34, 197, 94, 0.2);
-            color: #4ade80;
-            border: 1px solid rgba(34, 197, 94, 0.4);
-        }
-
-        .cv-badge.disconnected {
-            background: rgba(239, 68, 68, 0.2);
-            color: #f87171;
-            border: 1px solid rgba(239, 68, 68, 0.4);
-        }
-
-        #cvCanvasContainer {
-            position: relative;
-            width: 100%;
-            aspect-ratio: 4 / 3;
-            max-height: 52vh;
-            background: #000;
-            border-radius: 10px;
-            overflow: hidden;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        #cvCanvas {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
-            display: block;
-        }
-
-        #cvPlaceholder {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: #9ca3af;
-            gap: 8px;
-            background: rgba(13, 15, 20, 0.95);
-            text-align: center;
-            padding: 20px;
-            font-size: 14px;
-        }
-
-        #cvInfoBar {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .info-pill {
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 16px;
-            padding: 5px 12px;
-            font-size: 12px;
-            color: #e5e7eb;
-            font-weight: 500;
-        }
-
-        #cvTrackList {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            overflow-y: auto;
-            max-height: 25vh;
-        }
-
-        .track-card {
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 8px;
-            padding: 8px 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 13px;
-        }
-
-        .track-card .track-name {
-            font-weight: 600;
-            color: #60a5fa;
-        }
-
-        .track-card.known .track-name {
-            color: #34d399;
-        }
-
-        .track-card .track-sub {
-            font-size: 11px;
-            color: #9ca3af;
-        }
-
-        @media (max-width: 900px) {
-            #mainLayout {
-                flex-direction: column;
-                overflow-y: auto;
-            }
-
-            #leftPanel {
-                height: auto;
-                min-height: 400px;
-                border-right: none;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            }
-
-            #rightPanel {
-                height: 600px;
-                min-height: 500px;
-            }
-
-            #controls {
-                left: 10px;
-                right: 10px;
-                bottom: 10px;
-            }
-
-            #pttBanner {
-                bottom: 140px;
-            }
-
-            #status {
-                top: 10px;
-                left: 10px;
-            }
-
-            #transcriptContainer {
-                top: 60px;
-                right: 10px;
-                width: calc(100% - 20px);
-            }
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#202124" />
+  <title>Avatar call</title>
+  <link rel="stylesheet" href="/src/call.css" />
 </head>
-
 <body>
+  <!-- Inline Lucide icons; ISC attribution is served at /licenses/lucide.txt. -->
+  <div id="app">
+    <main id="mainLayout" aria-label="Avatar call">
+      <section id="rightPanel" aria-label="Alex, your virtual companion">
+        <div id="avatar"></div>
+        <div id="status" role="status">Connecting…</div>
+        <div id="loading" role="status">Loading your avatar…</div>
+        <div class="participantLabel"><span class="participantDot" aria-hidden="true"></span>Alex</div>
+      </section>
 
-<div id="app">
-    <div id="mainLayout">
-        <!-- LEFT PANEL: Live Computer Vision Feed -->
-        <div id="leftPanel">
-            <div id="cvHeader">
-                <div class="cv-title-group">
-                    <span class="live-dot"></span>
-                    <span class="cv-title">Live Camera Feed</span>
-                </div>
-                <div id="cvStatusBadge" class="cv-badge disconnected">Disconnected</div>
-            </div>
-
-            <div id="cvCanvasContainer">
-                <canvas id="cvCanvas" width="640" height="480"></canvas>
-                <div id="cvPlaceholder">
-                    <div style="font-size: 32px;">📹</div>
-                    <div>Connecting to CV feed...</div>
-                    <div style="font-size: 12px; color: #6b7280;">ws://localhost:8765</div>
-                </div>
-            </div>
-
+      <aside id="leftPanel" aria-label="Camera and conversation">
+        <section id="cameraPanel" aria-label="Your camera">
+          <header id="cvHeader">
+            <span class="cv-title"><svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg><span>You</span></span>
+            <span id="cvStatusBadge" class="cv-badge disconnected">Connecting</span>
+          </header>
+          <div id="cvCanvasContainer">
+            <canvas id="cvCanvas" width="640" height="480" aria-label="Live camera preview"></canvas>
+            <div id="cvPlaceholder">Connecting to your camera…</div>
+            <button id="cameraOverlays" type="button" aria-label="Hide computer vision overlays" aria-pressed="true" title="Hide computer vision overlays"><svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button id="cameraResize" type="button" aria-label="Resize camera preview" aria-describedby="cameraResizeHint" title="Drag to resize · arrow keys to adjust · Home to reset"><svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M19 13v6h-6"/><path d="M5 11V5h6"/><path d="m5 5 14 14"/></svg></button>
+          </div>
+          <span id="cameraResizeHint" class="srOnly">Drag the corner to resize. Use arrow keys when focused, or Home to reset.</span>
+          <details id="cameraDetails">
+            <summary>Camera details</summary>
             <div id="cvInfoBar">
-                <div class="info-pill" id="cvPeopleCount">👥 People: 0</div>
-                <div class="info-pill" id="cvActionBadge">⚡ Action: None</div>
-                <div class="info-pill" id="cvFpsBadge">📊 12 FPS Target</div>
+              <span class="info-pill" id="cvPeopleCount">People: 0</span>
+              <span class="info-pill" id="cvActionBadge">Action: None</span>
+              <span class="info-pill" id="cvLandmarkBadge">Landmarks: waiting</span>
             </div>
+            <div id="cvTrackList"></div>
+          </details>
+        </section>
 
-            <div id="cvTrackList">
-                <!-- Dynamically updated track cards -->
-            </div>
+        <section id="activityPanel" aria-label="Perception activity">
+          <span class="panelEyebrow">Activity</span>
+          <span id="activityEmpty">Updates appear here</span>
+          <div id="perceptionOverlay" role="status" aria-live="polite" hidden></div>
+        </section>
+
+        <section id="transcriptContainer" aria-label="Conversation">
+          <header id="transcriptHeader">
+            <h1>Conversation</h1>
+            <span id="sttBadge">Connecting</span>
+          </header>
+          <div id="transcriptBody" role="log" aria-label="Conversation history" tabindex="0" aria-live="polite" aria-relevant="additions text">
+            <div class="conversationEmpty"><span aria-hidden="true">“</span><p>A conversation starts with you.</p><small>Hold Space, or press and hold the microphone below.</small></div>
+          </div>
+        </section>
+      </aside>
+
+      <footer id="controls" aria-label="Call controls">
+        <div class="callIdentity"><button id="settingsButton" type="button" aria-label="Call settings" title="Settings" aria-haspopup="dialog"><svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></svg></button><span class="callLabel">Avatar call<small>Private conversation</small></span></div>
+        <div class="voiceControls">
+          <button id="pttBanner" type="button" class="ptt-idle" aria-label="Press and hold to speak" aria-pressed="false">
+            <span id="pttIcon" aria-hidden="true">🎙</span><span id="pttText">Hold Space to speak</span>
+          </button>
+          <button id="stopButton" type="button" class="stopControl" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button>
         </div>
-
-        <!-- RIGHT PANEL: TalkingHead Avatar Assistant -->
-        <div id="rightPanel">
-            <!-- TalkingHead renders here -->
-            <div id="avatar"></div>
-
-            <!-- Status -->
-            <div id="status">
-                Initializing...
-            </div>
-
-            <!-- Loading -->
-            <div id="loading">
-                Loading avatar...
-            </div>
-
-            <!-- Transcript Area -->
-            <div id="transcriptContainer">
-                <div id="transcriptHeader">
-                    <span>Conversation</span>
-                    <span id="sttBadge">STT: faster-whisper</span>
-                </div>
-                <div id="transcriptBody">
-                    <span style="color: #9ca3af;">Hold SPACE to speak to the avatar...</span>
-                </div>
-            </div>
-
-            <!-- Push-to-Talk visual feedback banner -->
-            <div id="pttBanner" class="ptt-idle">
-                <span id="pttIcon">🎤</span>
-                <span id="pttText">Hold SPACE to speak</span>
-            </div>
-
-            <!-- Controls -->
-            <div id="controls">
-
-                <input
-                    id="speechText"
-                    type="text"
-                    value="Hello! I am your avatar."
-                    placeholder="Type something to say..."
-                />
-
-                <button
-                    id="speakButton"
-                    class="primary"
-                >
-                    Speak
-                </button>
-
-                <button id="idleButton">
-                    Idle
-                </button>
-
-                <button id="waveButton">
-                    Wave
-                </button>
-
-                <button id="danceButton">
-                    Dance
-                </button>
-
-                <button id="poseButton">
-                    Pose
-                </button>
-
-                <button id="thumbButton">
-                    👍
-                </button>
-
-                <button id="namasteButton">
-                    🙏
-                </button>
-
-                <button id="nodButton">
-                    Nod
-                </button>
-
-                <button id="happyButton">
-                    Happy
-                </button>
-
-                <button id="neutralButton">
-                    Neutral
-                </button>
-
-                <button id="stopButton" class="danger">
-                    Stop
-                </button>
-
-            </div>
-        </div>
-    </div>
-</div>
-
-<script type="module" src="/src/main.js"></script>
-
+        <nav id="avatarActions" aria-label="Avatar actions">
+          <details class="moreActions">
+            <summary aria-label="Avatar animations" title="Avatar animations">🎬</summary>
+            <div class="actionMenu" id="animationControls"></div>
+          </details>
+        </nav>
+      </footer>
+    </main>
+  </div>
+  <dialog id="callSettings" aria-labelledby="settingsTitle" aria-describedby="settingsDescription">
+    <form id="settingsForm">
+      <header class="settingsHeader"><h2 id="settingsTitle">Call settings</h2><p id="settingsDescription">Make this conversation your own.</p></header>
+      <label for="avatarSelect">Avatar</label>
+      <select id="avatarSelect" name="avatar"></select>
+      <p class="settingHelp">Available TalkingHead models. Changing the avatar loads one model at a time.</p>
+      <label for="avatarZoom">Avatar zoom <output id="avatarZoomValue" for="avatarZoom">139.2%</output></label>
+      <input id="avatarZoom" name="avatarZoom" type="range" min="100" max="200" step="0.5" value="139.15" aria-describedby="zoomHelp">
+      <p id="zoomHelp" class="settingHelp">Adjust how closely the avatar is framed. The default is 15% closer than the current view.</p>
+      <label for="voiceSelect">Voice <span id="voiceProvider"></span></label>
+      <select id="voiceSelect" name="voice" disabled></select>
+      <p class="settingHelp">Used the next time you speak. Your choices are remembered in this browser.</p>
+      <p id="settingsStatus" role="status" aria-live="polite"></p>
+      <footer class="settingsFooter"><button id="settingsCancel" type="button">Cancel</button><button id="settingsSave" type="submit">Save changes</button></footer>
+    </form>
+  </dialog>
+  <script type="module" src="/src/main.js"></script>
 </body>
 </html>

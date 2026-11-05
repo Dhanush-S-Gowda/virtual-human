@@ -10,6 +10,8 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from config import settings
+from diagnostics import traced_stage
+from runtime import ModelWorker, worker_policy
 
 logger = logging.getLogger(__name__)
 _INFERENCE_LOCK = threading.Lock()
@@ -39,6 +41,8 @@ def _load_model(local_files_only: bool = True):
         compute_type=settings.faster_whisper_compute_type,
         download_root=str(download_root),
         local_files_only=local_files_only,
+        cpu_threads=worker_policy(settings, "stt")[1],
+        num_workers=1,
     )
     logger.info("faster-whisper model loaded.")
     return model
@@ -50,6 +54,7 @@ def _decode_audio(audio: bytes):
     return decode_audio(BytesIO(audio))
 
 
+@traced_stage("stt.transcribe")
 def _transcribe(audio: bytes) -> dict:
     if not audio:
         raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
@@ -59,6 +64,7 @@ def _transcribe(audio: bytes) -> dict:
         waveform = _decode_audio(audio)
         segments, info = model.transcribe(
             waveform,
+            language="en",
             beam_size=5,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
@@ -73,15 +79,21 @@ def _transcribe(audio: bytes) -> dict:
 
 
 class FasterWhisperProvider:
+    def __init__(self):
+        self._worker = ModelWorker(settings, "stt")
+
     async def initialize(self) -> None:
         """Load or download the configured CTranslate2 model at startup."""
-        await asyncio.to_thread(_load_model)
+        await self._worker.run(_load_model)
+
+    async def close(self):
+        await self._worker.close()
 
     async def transcribe(self, audio: bytes, content_type: str) -> dict:
         """Transcribe the recording with the cached in-process model."""
         del content_type  # PyAV identifies the encoded audio from its container.
         try:
-            return await asyncio.to_thread(_transcribe, audio)
+            return await self._worker.run(_transcribe, audio)
         except HTTPException:
             raise
         except Exception as exc:

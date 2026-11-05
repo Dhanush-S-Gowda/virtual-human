@@ -38,6 +38,7 @@ class FasterWhisperProviderTests(unittest.TestCase):
             {"text": "hello world", "language": "en", "duration": 1.25},
         )
         self.assertIs(model.waveform, waveform)
+        self.assertEqual(model.options["language"], "en")
         self.assertEqual(model.options["beam_size"], 5)
         self.assertTrue(model.options["vad_filter"])
 

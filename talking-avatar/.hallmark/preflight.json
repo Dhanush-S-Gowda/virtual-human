@@ -1,0 +1,10 @@
+{
+  "scope": "Single-page avatar call UI, user-specified centered stage and top-right camera",
+  "sources": ["index.html", "src/main.js", "package.json"],
+  "framework": "Vite, vanilla JavaScript, Three.js TalkingHead",
+  "font": "Existing Inter/system sans-serif stack",
+  "palette": "Existing dark neutral surfaces and blue accent",
+  "motion": "Existing avatar motion; no additional decorative page motion",
+  "tokens": "tokens.css",
+  "verification": "Build and behavior tests; browser surface unavailable for visual verification"
+}

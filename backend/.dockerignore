@@ -4,3 +4,5 @@ __pycache__
 .cache
 supertonic/assets
 tests
+assets/cv
+data

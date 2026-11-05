@@ -1,0 +1,23 @@
+:root {
+  --color-paper: #202124;
+  --color-paper-2: #292a2d;
+  --color-paper-3: #35363a;
+  --color-ink: #f1f3f4;
+  --color-ink-2: #bdc1c6;
+  --color-rule: #45474c;
+  --color-accent: #a8c7fa;
+  --color-focus: #8ab4f8;
+  --color-success: #81c995;
+  --color-danger: #f28b82;
+  --font-body: Inter, "Google Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --space-xs: .375rem;
+  --space-sm: .625rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --radius-sm: .5rem;
+  --radius-md: 1rem;
+  --text-sm: .75rem;
+  --text-body: .875rem;
+  --dur-short: 150ms;
+  --ease-out: ease-out;
+}

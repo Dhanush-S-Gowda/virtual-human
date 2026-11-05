@@ -1,0 +1,67 @@
+[
+  {
+    "tag": "clapping",
+    "label": "Clapping",
+    "files": [
+      "Clapping.fbx"
+    ]
+  },
+  {
+    "tag": "enthusiasm",
+    "label": "Enthusiasm",
+    "files": [
+      "Enthusiasm.fbx"
+    ]
+  },
+  {
+    "tag": "greeting",
+    "label": "Greeting",
+    "files": [
+      "Greeting.fbx"
+    ]
+  },
+  {
+    "tag": "laughing",
+    "label": "Laughing",
+    "files": [
+      "Laughing.fbx"
+    ]
+  },
+  {
+    "tag": "nod_no",
+    "label": "Nod no",
+    "files": [
+      "Nod_No.fbx"
+    ]
+  },
+  {
+    "tag": "nod_yes",
+    "label": "Nod yes",
+    "files": [
+      "Nod_yes.fbx"
+    ]
+  },
+  {
+    "tag": "talking",
+    "label": "Talking",
+    "files": [
+      "Talking.fbx",
+      "Talking2.fbx",
+      "Talking3.fbx"
+    ]
+  },
+  {
+    "tag": "thankful",
+    "label": "Thankful",
+    "files": [
+      "Thankful.fbx"
+    ]
+  },
+  {
+    "tag": "thinking",
+    "label": "Thinking",
+    "files": [
+      "Thinking.fbx"
+    ]
+  }
+]

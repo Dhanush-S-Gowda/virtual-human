@@ -13,11 +13,11 @@ from tts.supertonic import SupertonicProvider, _approximate_word_timings, _resol
 
 
 class SupertonicProviderTests(unittest.TestCase):
-    def test_kokoro_voice_uses_configured_f1_style_and_style_names_resolve(self):
-        configured_style = _resolve_style("af_bella")
-        named_style = _resolve_style("F1")
-        self.assertEqual(configured_style.name, "F1.json")
-        self.assertEqual(named_style, configured_style)
+    def test_frontend_voice_styles_resolve_without_yaml_selection(self):
+        self.assertEqual(_resolve_style("F1").name, "F1.json")
+        self.assertEqual(_resolve_style("M1").name, "M1.json")
+        with self.assertRaises(ValueError):
+            _resolve_style("af_heart")
 
     def test_word_timings_cover_duration_and_match_word_count(self):
         words, starts, durations = _approximate_word_timings("Hello, talking head!", 2.0)
@@ -39,8 +39,8 @@ class SupertonicProviderTests(unittest.TestCase):
 
         async def call_provider():
             with patch("tts.supertonic._synthesize", return_value=expected) as synthesize:
-                result = await SupertonicProvider().synthesize_segment(" Hello ", "af_bella", 1.1)
-                synthesize.assert_called_once_with("Hello", "af_bella", 1.1)
+                result = await SupertonicProvider().synthesize_segment(" Hello ", "M1", 1.1)
+                synthesize.assert_called_once_with("Hello", "M1", 1.1)
                 return result
 
         self.assertEqual(asyncio.run(call_provider()), expected)

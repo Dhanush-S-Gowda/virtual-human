@@ -1,1 +1,0 @@
-"""Action recognition sub-package."""

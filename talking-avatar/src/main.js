@@ -2,6 +2,22 @@ import { TalkingHead } from "./talkinghead/talkinghead.mjs";
 import { STTManager, STTState } from "./stt/STTManager.js";
 import { KeyboardPushToTalk } from "./stt/keyboardPushToTalk.js";
 import { avatarController, AvatarState } from "./avatar/AvatarController.js";
+import { ActionQueue } from "./avatar/ActionQueue.js";
+import { ListeningNods } from "./avatar/ListeningNods.js";
+import { SpeechActions } from "./avatar/SpeechActions.js";
+import { playClipAction } from "./avatar/clipAction.js";
+import { CLIP_ACTIONS, chooseClip, mountAnimationControls } from "./avatar/clipActions.js";
+import { createHeadPitchLimiter } from "./avatar/headPitch.js";
+import { GestureTimeline } from "./avatar/GestureTimeline.js";
+import { TalkingGestures } from "./avatar/TalkingGestures.js";
+import { acceptLandmarkFrame, drawLandmarkOverlay, freshLandmarkFrame, landmarkStatus } from "./cv/landmarkOverlay.js";
+import { GestureEvents } from "./cv/gestureEvents.js";
+import { CameraGestureResponses } from "./cv/cameraGestureResponses.js";
+import { SpeakingEvents } from "./cv/speakingEvents.js";
+import { setupCameraResize } from "./ui/cameraResize.js";
+import { setupAvatarFraming } from "./ui/avatarFraming.js";
+import { CallPreferences, avatarOptions, mountCallSettings } from "./ui/callSettings.js";
+import { ConversationLog } from "./ui/conversationLog.js";
 
 /**
  * --------------------------------------------------------------------------
@@ -24,14 +40,42 @@ const BACKEND_URL =
  * Global TalkingHead instance.
  */
 let head = null;
+let avatarReady = false;
+let loadedAvatarId = null;
+let refitAvatar = () => {};
+const callPreferences = new CallPreferences();
+let avatarZoomFactor = callPreferences.zoomFactor;
+let refreshCallSettings = () => {};
 
-/**
- * Prevent multiple TTS requests from playing simultaneously.
- */
-let speechSocket = null;
 
 /** Serialize decode and enqueue work so streamed segments stay in order. */
 let speechPlaybackQueue = Promise.resolve();
+const avatarActionQueue = new ActionQueue((error) => console.error("Avatar action failed:", error));
+const limitHeadPitch = createHeadPitchLimiter();
+const clipActions = Object.fromEntries(Object.keys(CLIP_ACTIONS).map((action) => [
+    action, () => playCatalogAction(action),
+]));
+const speechActions = new SpeechActions(() => Boolean(head?.isSpeaking));
+const gestureTimeline = new GestureTimeline((action) => {
+    if (action === "talking") return; // Speech already owns automatic low-priority talking motion.
+    if (Object.hasOwn(CLIP_ACTIONS, action)) playCatalogAction(action, "tagged");
+}, () => avatarActionQueue.busy || document.hidden);
+const cameraResponses = new CameraGestureResponses(
+    (action) => playCatalogAction(action, "camera"),
+    () => !avatarReady || avatarActionQueue.busy || document.hidden
+);
+const talkingGestures = new TalkingGestures(
+    (url, signal) => playClipAction(head, url, signal, { armsOnly: true }),
+    () => avatarActionQueue.busy || document.hidden
+        || gestureTimeline.hasUpcomingForeground(head?.audioCtx?.currentTime ?? 0)
+);
+let speechGeneration = 0;
+let speechPreparation = new AbortController();
+const listeningNods = new ListeningNods(
+    () => avatarReady ? head : null,
+    () => avatarActionQueue.busy || Boolean(head?.isSpeaking) || document.hidden
+
+);
 
 /**
  * Tracks whether the avatar is currently speaking.
@@ -54,44 +98,23 @@ const loadingElement =
 const statusElement =
     document.getElementById("status");
 
-const speechTextElement =
-    document.getElementById("speechText");
-
-const speakButton =
-    document.getElementById("speakButton");
-
 const idleButton =
     document.getElementById("idleButton");
 
-const waveButton =
-    document.getElementById("waveButton");
 
-const danceButton =
-    document.getElementById("danceButton");
 
-const poseButton =
-    document.getElementById("poseButton");
 
-const thumbButton =
-    document.getElementById("thumbButton");
 
-const namasteButton =
-    document.getElementById("namasteButton");
 
-const nodButton =
-    document.getElementById("nodButton");
 
-const happyButton =
-    document.getElementById("happyButton");
 
-const neutralButton =
-    document.getElementById("neutralButton");
 
 const stopButton =
     document.getElementById("stopButton");
 
 const transcriptBody =
     document.getElementById("transcriptBody");
+const conversationLog = new ConversationLog(transcriptBody);
 
 const pttBanner =
     document.getElementById("pttBanner");
@@ -121,23 +144,24 @@ function updatePTTUI(state, message = "") {
     }
 
     pttBanner.className = "";
+    pttBanner.setAttribute("aria-pressed", String(state === STTState.LISTENING));
 
     switch (state) {
         case STTState.LISTENING:
             pttBanner.classList.add("ptt-listening");
             pttIcon.textContent = "🔴";
-            pttText.textContent = "LISTENING... Release SPACE when finished";
+            pttText.textContent = "Listening · release to send";
             break;
 
         case STTState.TRANSCRIBING:
             pttBanner.classList.add("ptt-transcribing");
             pttIcon.textContent = "⏳";
-            pttText.textContent = "TRANSCRIBING...";
+            pttText.textContent = "Finishing transcript…";
             break;
 
         case "THINKING":
             pttBanner.classList.add("ptt-thinking");
-            pttIcon.textContent = "🧠";
+            pttIcon.textContent = "◌";
             pttText.textContent = "Thinking...";
             break;
 
@@ -152,84 +176,58 @@ function updatePTTUI(state, message = "") {
         default:
             pttBanner.classList.add("ptt-idle");
             pttIcon.textContent = "🎤";
-            pttText.textContent = "Hold SPACE to speak";
+            pttText.textContent = "Hold Space to speak";
             break;
     }
 }
 
 /**
- * Update transcript box display.
+ * Append a message and end any previous streamed reply.
  *
- * @param {"user"|"error"|"info"} type
  * @param {"user"|"avatar"|"thinking"|"error"|"info"} type
  * @param {string} text
  */
 function updateTranscriptUI(type, text) {
-    if (!transcriptBody) {
-        return;
-    }
-
-    if (type === "user") {
-        transcriptBody.innerHTML = `
-            <div class="transcript-user">You said:</div>
-            <div class="transcript-text">"${text}"</div>
-        `;
-    } else if (type === "avatar") {
-        transcriptBody.innerHTML = `
-            <div class="transcript-avatar">Avatar:</div>
-            <div class="transcript-reply">${text}</div>
-        `;
-    } else if (type === "thinking") {
-        transcriptBody.innerHTML = `
-            <div class="transcript-thinking">🧠 Thinking...</div>
-        `;
-    } else if (type === "error") {
-        transcriptBody.innerHTML = `
-            <div class="transcript-error">${text}</div>
-        `;
-    } else if (type === "info") {
-        transcriptBody.innerHTML = `
-            <span style="color: #9ca3af;">${text}</span>
-        `;
-    }
-}
-
-/**
- * Append to transcript without clearing the existing content.
- * Used to show the avatar reply below the user transcript.
- *
- * @param {"avatar"|"thinking"|"error"} type
- * @param {string} text
- */
-function appendTranscriptUI(type, text) {
-    if (!transcriptBody) {
-        return;
-    }
-
-    const el = document.createElement("div");
-
-    if (type === "avatar") {
-        el.innerHTML = `
-            <div class="transcript-avatar">Avatar:</div>
-            <div class="transcript-reply">${text}</div>
-        `;
-    } else if (type === "thinking") {
-        el.className = "transcript-thinking";
-        el.textContent = "🧠 Thinking...";
-    } else if (type === "error") {
-        el.className = "transcript-error";
-        el.textContent = text;
-    }
-
-    transcriptBody.appendChild(el);
-    el.scrollIntoView({ behavior: "smooth", block: "end" });
+    conversationLog.finishReply();
+    conversationLog.append(type, text);
 }
 
 /**
  * STT Manager instance.
  */
+const speakingEvents = new SpeakingEvents();
+function visiblePeopleForSpeech() {
+    if (!latestCVMetadata || performance.now() - lastMetadataReceivedTime > 1500) return [];
+    return (latestCVMetadata.people || []).map((person) => ({
+        ...person, source_id: latestCVMetadata.source_id,
+    }));
+}
 const sttManager = new STTManager({
     endpoint: BACKEND_URL,
+    getStartOptions: async () => {
+        if (!callPreferences.provider) await loadRuntimeInfo();
+        if (!callPreferences.provider) throw new Error("Voice settings are unavailable. Check the backend connection.");
+        return { voice: callPreferences.voice };
+    },
+    getContext: () => ({ speaker: speakingEvents.snapshot() }),
+    onCaptureStart: () => {
+        speechGeneration++;
+        speechPreparation.abort();
+        speechPreparation = new AbortController();
+        gestureTimeline.clear();
+        void talkingGestures.clear();
+        speechActions.clear();
+        listeningNods.start();
+        for (const event of speakingEvents.start(visiblePeopleForSpeech())) handleCVEvent(event);
+    },
+    onAudioActivity: (sample) => {
+        speakingEvents.addAudio(sample);
+        listeningNods.addAudio(sample);
+    },
+    onCaptureEnd: () => {
+        listeningNods.stop();
+        for (const event of speakingEvents.stop()) handleCVEvent(event);
+    },
     onStateChange: (state, detail) => {
         updatePTTUI(state, detail);
     },
@@ -238,31 +236,34 @@ const sttManager = new STTManager({
         updatePTTUI("THINKING");
         avatarController.setState(AvatarState.IDLE);
         setStatus("Transcribed — generating reply...");
-        forwardTranscriptToCV(result.text);
     },
     onEvent: (event) => {
-        if (event.type === "llm_delta") {
-            if (!window.currentAvatarReply) {
-                window.currentAvatarReply = "";
-                appendTranscriptUI("avatar", "");
-            }
-            window.currentAvatarReply += event.text;
-            const replies = transcriptBody?.querySelectorAll(".transcript-reply");
-            if (replies?.length) replies[replies.length - 1].textContent = window.currentAvatarReply;
+        if (event.type === "avatar_action") {
+            const actions = { gesture: clipActions };
+            const action = actions[event.tool]?.[event.action];
+            if (action) speechActions.add(action);
+        } else if (event.type === "llm_delta") {
+            conversationLog.appendReplyDelta(event.text);
         } else if (event.type === "speech") {
-            speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event)).catch((error) => {
+            const generation = speechGeneration;
+            speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event, generation)).catch((error) => {
+                if (generation !== speechGeneration) return;
+                speechActions.clear();
                 console.error("Speech playback failed:", error);
                 setStatus("Speech playback failed.");
             });
         } else if (event.type === "metrics") {
+            updateProviderBadge(event.metrics);
             console.info("Conversation metrics", event.metrics);
         } else if (event.type === "done") {
-            window.currentAvatarReply = "";
+            conversationLog.finishReply();
             setStatus("Ready");
             updatePTTUI(STTState.IDLE);
         }
     },
     onError: (errorMsg) => {
+        speechActions.clear();
+        listeningNods.stop();
         updateTranscriptUI("error", errorMsg);
         setStatus(errorMsg);
         updatePTTUI(STTState.ERROR, errorMsg);
@@ -279,7 +280,7 @@ const sttManager = new STTManager({
 const pushToTalk = new KeyboardPushToTalk({
     key: "Space",
     onStart: async () => {
-        if (isSpeaking) {
+        if (isSpeaking || head?.isSpeaking || avatarActionQueue.busy) {
             stopEverything();
         }
         avatarController.setState(AvatarState.LISTENING);
@@ -384,11 +385,6 @@ function setSpeakingState(speaking) {
 
     isSpeaking = speaking;
 
-    if (speakButton) {
-
-        speakButton.disabled =
-            speaking;
-    }
 }
 
 
@@ -474,14 +470,6 @@ async function executeAction(
  */
 
 /**
- * Stop any currently running Kokoro request.
- */
-function cancelSpeechRequest() {
-    speechSocket?.close();
-    speechSocket = null;
-}
-
-/**
  * Convert base64 audio returned by the backend
  * into an ArrayBuffer.
  */
@@ -500,39 +488,28 @@ function base64ToArrayBuffer(base64) {
 }
 
 
-/**
- * Generate speech using the local Kokoro backend
- * and send the resulting AudioBuffer + word timings
- * to TalkingHead.
- */
-async function speakWithKokoro(text) {
-
-    if (!head) {
-        throw new Error(
-            "TalkingHead has not been initialized."
-        );
+/** Play a speech segment received from the conversation backend. */
+async function playSpeechResult(result, generation) {
+    if (generation !== speechGeneration) return;
+    const signal = speechPreparation.signal;
+    let cancelPreparation;
+    const cancelled = new Promise((resolve) => { cancelPreparation = resolve; });
+    signal.addEventListener("abort", cancelPreparation, { once: true });
+    try {
+    const actionsToPrepare = new Set(["talking", ...(result.gestures || []).map(({ action }) => action)]);
+    await Promise.race([cancelled, Promise.all([...actionsToPrepare].map(async (action) => {
+        if (!Object.hasOwn(CLIP_ACTIONS, action)) return;
+        try {
+            await Promise.all(CLIP_ACTIONS[action].urls.map((url) =>
+                head.playAnimation(url, null, 0.01, 0, 0.01, signal, true)));
+        } catch (error) {
+            console.warn("Gesture asset unavailable:", action, error);
+        }
+    }))]);
+    } finally {
+        signal.removeEventListener("abort", cancelPreparation);
     }
-
-    const result = await new Promise((resolve, reject) => {
-        speechSocket = new WebSocket(BACKEND_URL.replace(/^http/, "ws") + "/ws");
-        speechSocket.onopen = () => speechSocket.send(JSON.stringify({
-            type: "start", mode: "speak", text,
-        }));
-        speechSocket.onmessage = ({ data }) => {
-            const event = JSON.parse(data);
-            if (event.type === "speech") resolve(event);
-            else if (event.type === "error") reject(new Error(event.message));
-            else if (event.type === "done") {
-                speechSocket?.close();
-                speechSocket = null;
-            }
-        };
-        speechSocket.onerror = () => reject(new Error("Cannot reach the conversation backend."));
-    });
-    await playSpeechResult(result);
-}
-
-async function playSpeechResult(result) {
+    if (generation !== speechGeneration) return;
 
     /*
      * Validate backend response.
@@ -578,6 +555,7 @@ async function playSpeechResult(result) {
         await head.audioCtx.decodeAudioData(
             wavBuffer.slice(0)
         );
+    if (generation !== speechGeneration) return;
 
     /*
      * Send AudioBuffer + word timings to TalkingHead.
@@ -594,54 +572,24 @@ async function playSpeechResult(result) {
 
             wtimes: result.wtimes,
 
-            wdurations: result.wdurations
+            wdurations: result.wdurations,
+            onAudioStart: (start, rate, duration) => {
+                if (generation !== speechGeneration) return;
+                gestureTimeline.schedule(result.gestures, start, rate);
+                talkingGestures.until(start + duration / rate);
+                speechActions.startSpeech();
+            }
         },
         {
             lipsyncLang: "en",
             isRaw: true
         }
     );
+    listeningNods.stop();
 
     setStatus("Speaking...");
 }
 
-
-/**
- * --------------------------------------------------------------------------
- * Speech button handler
- * --------------------------------------------------------------------------
- */
-
- async function handleSpeak() {
-
-     const text =
-         speechTextElement?.value?.trim();
-
-     if (!text) {
-         setStatus("Enter something to say.");
-         return;
-     }
-
-     try {
-
-         setStatus("Generating speech...");
-
-         await speakWithKokoro(text);
-
-     } catch (error) {
-
-         console.error(
-             "Kokoro speech failed:",
-             error
-         );
-
-         setStatus(
-             error instanceof Error
-                 ? error.message
-                 : "Speech failed."
-         );
-     }
- }
 
 /**
  * --------------------------------------------------------------------------
@@ -650,11 +598,13 @@ async function playSpeechResult(result) {
  */
 
 function stopSpeech() {
-
-    /*
-     * Cancel pending FastAPI request.
-     */
-    cancelSpeechRequest();
+    speechGeneration++;
+    speechPreparation.abort();
+    speechPreparation = new AbortController();
+    gestureTimeline.clear();
+    cameraResponses.clear();
+    void talkingGestures.clear();
+    speechActions.clear();
 
     /*
      * Stop browser-native speech if it somehow
@@ -757,18 +707,27 @@ async function initializeAvatar() {
                     // Keep generated speech at unity gain.
                     mixerGainSpeech:
                         1,
+                    // Runs after FBX playback and TalkingHead's additive pose layers.
+                    update: () => {
+                        limitHeadPitch(head);
+                        if (head?.audioCtx) {
+                            gestureTimeline.advance(head.audioCtx.currentTime);
+                            cameraResponses.update();
+                            talkingGestures.update(head.audioCtx.currentTime);
+                        }
+                    },
 
                     /*
                      * Camera controls.
                      */
                     cameraRotateEnable:
-                        true,
+                        false,
 
                     cameraPanEnable:
                         false,
 
                     cameraZoomEnable:
-                        true,
+                        false,
 
                     /*
                      * Avatar idle behaviour.
@@ -822,20 +781,7 @@ async function initializeAvatar() {
 
 
         await head.showAvatar(
-            {
-
-                url:
-                    "/avatars/brunette.glb",
-
-                body:
-                    "F",
-
-                avatarMood:
-                    "neutral",
-
-                lipsyncLang:
-                    "en",
-            },
+            avatarOptions(callPreferences.avatar),
 
             (event) => {
 
@@ -872,6 +818,9 @@ async function initializeAvatar() {
          * ------------------------------------------------------------------
          */
 
+        refitAvatar = setupAvatarFraming(head, avatarElement, () => avatarZoomFactor);
+        loadedAvatarId = callPreferences.avatar;
+        avatarReady = true;
         head.start();
 
         avatarController.setHead(head);
@@ -920,6 +869,9 @@ async function initializeAvatar() {
  */
 function idle() {
 
+    listeningNods.stop();
+    avatarActionQueue.clear();
+
     executeAction(
         "Idle",
         async (avatar) => {
@@ -947,287 +899,36 @@ function idle() {
 }
 
 
-let activeWaveTimer = null;
-let activeWaveFrame = null;
 
-function stopActiveWave(avatar) {
-    if (activeWaveTimer) {
-        clearTimeout(activeWaveTimer);
-        activeWaveTimer = null;
-    }
-    if (activeWaveFrame) {
-        cancelAnimationFrame(activeWaveFrame);
-        activeWaveFrame = null;
-    }
-    if (avatar) {
-        try {
-            if (avatar.poseDelta && avatar.poseDelta.props) {
-                if (avatar.poseDelta.props['RightForeArm.quaternion']) {
-                    avatar.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: 0 };
-                }
-                if (avatar.poseDelta.props['RightHand.quaternion']) {
-                    avatar.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: 0 };
-                }
-                if (avatar.poseDelta.props['LeftForeArm.quaternion']) {
-                    avatar.poseDelta.props['LeftForeArm.quaternion'] = { x: 0, y: 0, z: 0 };
-                }
-                if (avatar.poseDelta.props['LeftHand.quaternion']) {
-                    avatar.poseDelta.props['LeftHand.quaternion'] = { x: 0, y: 0, z: 0 };
-                }
-            }
-            avatar.stopGesture(500);
-            if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
-                avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
-            }
-        } catch (err) {
-            console.debug("stopActiveWave cleanup warning:", err);
-        }
-    }
+function playCatalogAction(action, kind = "manual") {
+    const spec = CLIP_ACTIONS[action];
+    if (!spec) return;
+    queueAvatarAction(spec.label, (avatar, signal) => playClipAction(
+        avatar, chooseClip(action), signal, { armsOnly: action === "talking" }), action === "talking" ? "talking" : kind);
 }
 
-/**
- * Dynamic Waving animation with natural side-to-side oscillation
- * and clean arm lowering upon completion.
- */
-function wave() {
-
-    executeAction(
-        "Wave",
-        async (avatar) => {
-            stopActiveWave(avatar);
-
-            // Raise right hand (mirrored = right hand wave!)
-            avatar.playGesture(
-                "handup",
-                null,
-                true,
-                400
-            );
-            avatar.setMood("happy");
-
-            const startTime = performance.now();
-            const waveDurationMs = 2800;
-
-            function animateWave(now) {
-                const elapsed = now - startTime;
-                if (elapsed >= waveDurationMs) {
-                    stopActiveWave(avatar);
-                    avatar.setMood("neutral");
-                    return;
-                }
-
-                // Sinusoidal wave oscillation (envelope smooths start and end)
-                const progress = elapsed / waveDurationMs;
-                const envelope = Math.sin(Math.PI * progress);
-                const angle = Math.sin((elapsed / 1000) * Math.PI * 4.5) * 0.36 * envelope;
-
-                if (avatar.poseDelta && avatar.poseDelta.props) {
-                    avatar.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: angle };
-                    avatar.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: angle * 0.75 };
-                }
-
-                activeWaveFrame = requestAnimationFrame(animateWave);
-            }
-
-            activeWaveFrame = requestAnimationFrame(animateWave);
-        }
-    );
+function queueAvatarAction(name, action, kind = "manual") {
+    avatarActionQueue.enqueue((signal) => executeAction(name, async (avatar) => {
+        await talkingGestures.interrupt();
+        if (signal.aborted) return;
+        listeningNods.stopNod();
+        resetAvatarGesture(avatar);
+        await action(avatar, signal);
+    }), { kind });
 }
 
-
-/**
- * Dance.
- */
-function dance() {
-
-    executeAction(
-        "Dance",
-        async (avatar) => {
-
-            await avatar.playAnimation(
-                "/poses/dance.fbx",
-
-                null,
-
-                8,
-
-                0,
-
-                0.01
-            );
-        }
-    );
+function resetAvatarGesture(avatar) {
+    avatar.stopGesture(200);
+    if (avatar.poseCurrentTemplate) avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
 }
-
-
-/**
- * Walking animation.
- */
-function walk() {
-
-    executeAction(
-        "Walking",
-        async (avatar) => {
-
-            await avatar.playAnimation(
-                "/animations/walking.fbx",
-
-                null,
-
-                8,
-
-                0,
-
-                0.01
-            );
-        }
-    );
-}
-
-
-/**
- * Play initial pose contained in dance.fbx.
- */
-function pose() {
-
-    executeAction(
-        "Pose",
-        async (avatar) => {
-
-            await avatar.playPose(
-                "/poses/dance.fbx",
-
-                null,
-
-                5,
-
-                0,
-
-                0.01
-            );
-        }
-    );
-}
-
-
-/**
- * Thumb-up gesture.
- */
-function thumbUp() {
-
-    executeAction(
-        "Thumb up",
-        async (avatar) => {
-            stopActiveWave(avatar);
-
-            avatar.playGesture(
-                "thumbup",
-                3,
-                true,
-                400
-            );
-            avatar.setMood("happy");
-
-            setTimeout(() => {
-                if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
-                    avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
-                }
-                avatar.setMood("neutral");
-            }, 3000);
-        }
-    );
-}
-
-
-/**
- * Namaste / Folded hands gesture.
- */
-function namaste() {
-
-    executeAction(
-        "Namaste",
-        async (avatar) => {
-            stopActiveWave(avatar);
-
-            avatar.playGesture(
-                "namaste",
-                3,
-                false,
-                500
-            );
-            avatar.setMood("happy");
-
-            setTimeout(() => {
-                if (avatar.poseCurrentTemplate && typeof avatar.setPoseFromTemplate === "function") {
-                    avatar.setPoseFromTemplate(avatar.poseCurrentTemplate, 600);
-                }
-                avatar.setMood("neutral");
-            }, 3000);
-        }
-    );
-}
-
-
-/**
- * Head nod gesture.
- */
-function nod() {
-
-    executeAction(
-        "Nod",
-        async (avatar) => {
-            avatar.playGesture("yes", 2);
-        }
-    );
-}
-
-
-/**
- * Happy mood.
- */
-function happy() {
-
-    executeAction(
-        "Happy",
-        async (avatar) => {
-
-            avatar.setMood(
-                "happy"
-            );
-
-            avatar.lookAtCamera(
-                1000
-            );
-        }
-    );
-}
-
-
-/**
- * Neutral mood.
- */
-function neutral() {
-
-    executeAction(
-        "Neutral",
-        async (avatar) => {
-
-            avatar.setMood(
-                "neutral"
-            );
-
-            avatar.lookAtCamera(
-                1000
-            );
-        }
-    );
-}
-
 
 /**
  * Stop everything.
  */
 function stopEverything() {
+
+    listeningNods.stop();
+    avatarActionQueue.clear();
 
     try {
 
@@ -1249,7 +950,7 @@ function stopEverything() {
         const avatar =
             requireHead();
 
-        stopActiveWave(avatar);
+        resetAvatarGesture(avatar);
 
         avatar.stopAnimation();
 
@@ -1295,16 +996,94 @@ function stopEverything() {
  * --------------------------------------------------------------------------
  */
 
+async function changeAvatar(id) {
+    if (!avatarReady) throw new Error("Your avatar is still loading. Try again in a moment.");
+    if (id === loadedAvatarId) return;
+    const previous = loadedAvatarId;
+    stopEverything();
+    avatarReady = false;
+    head.stop();
+    showLoading();
+    setLoading("Loading avatar…");
+    try {
+        await head.showAvatar(avatarOptions(id));
+        loadedAvatarId = id;
+        avatarReady = true;
+        refitAvatar();
+        avatarController.setHead(head);
+        avatarController.setState(AvatarState.IDLE);
+        setStatus("Ready");
+    } catch (error) {
+        try {
+            await head.showAvatar(avatarOptions(previous));
+            avatarReady = true;
+            refitAvatar();
+            avatarController.setHead(head);
+            avatarController.setState(AvatarState.IDLE);
+        } catch (restoreError) {
+            console.error("Could not restore avatar:", restoreError);
+        }
+        setStatus(avatarReady ? "Previous avatar restored" : "Avatar unavailable. Reload to retry.");
+        throw new Error("Could not load that avatar. Please try another model.");
+    } finally {
+        hideLoading();
+        if (!document.hidden && avatarReady) head.start();
+    }
+}
+
 function registerEventHandlers() {
+    refreshCallSettings = mountCallSettings(callPreferences, changeAvatar, (factor) => {
+        avatarZoomFactor = factor;
+        refitAvatar();
+    });
 
-    /**
-     * Kokoro TTS.
-     */
-    speakButton?.addEventListener(
-        "click",
-        handleSpeak
-    );
-
+    setupCameraResize(document.getElementById("app"), document.getElementById("cameraResize"),
+        document.getElementById("cvCanvasContainer"), document.getElementById("leftPanel"));
+    const overlayToggle = document.getElementById("cameraOverlays");
+    overlayToggle?.addEventListener("click", () => {
+        showCVOverlays = !showCVOverlays;
+        overlayToggle.setAttribute("aria-pressed", String(showCVOverlays));
+        overlayToggle.setAttribute("aria-label", `${showCVOverlays ? "Hide" : "Show"} computer vision overlays`);
+        overlayToggle.title = `${showCVOverlays ? "Hide" : "Show"} computer vision overlays`;
+        overlayToggle.classList.toggle("is-active", showCVOverlays);
+    });
+    let holdingMic = false;
+    const startMic = () => {
+        if (holdingMic) return;
+        holdingMic = true;
+        pushToTalk.onStart();
+    };
+    const stopMic = () => {
+        if (!holdingMic) return;
+        holdingMic = false;
+        pushToTalk.onStop();
+    };
+    const cancelMic = () => {
+        if (!holdingMic) return;
+        holdingMic = false;
+        pushToTalk.onCancel();
+    };
+    pttBanner.addEventListener("pointerdown", (event) => {
+        if (!event.isPrimary || event.button !== 0) return;
+        event.preventDefault();
+        pttBanner.setPointerCapture(event.pointerId);
+        startMic();
+    });
+    pttBanner.addEventListener("pointerup", stopMic);
+    pttBanner.addEventListener("pointercancel", cancelMic);
+    pttBanner.addEventListener("lostpointercapture", cancelMic);
+    pttBanner.addEventListener("keydown", (event) => {
+        if (![" ", "Enter"].includes(event.key)) return;
+        event.preventDefault();
+        if (!event.repeat) startMic();
+    });
+    pttBanner.addEventListener("keyup", (event) => {
+        if (![" ", "Enter"].includes(event.key)) return;
+        event.preventDefault();
+        stopMic();
+    });
+    window.addEventListener("blur", cancelMic);
+    document.addEventListener("visibilitychange", () => { if (document.hidden) cancelMic(); });
 
     /**
      * Avatar controls.
@@ -1314,71 +1093,18 @@ function registerEventHandlers() {
         idle
     );
 
-    waveButton?.addEventListener(
-        "click",
-        wave
-    );
 
-    danceButton?.addEventListener(
-        "click",
-        dance
-    );
 
-    poseButton?.addEventListener(
-        "click",
-        pose
-    );
 
-    thumbButton?.addEventListener(
-        "click",
-        thumbUp
-    );
 
-    namasteButton?.addEventListener(
-        "click",
-        namaste
-    );
 
-    nodButton?.addEventListener(
-        "click",
-        nod
-    );
+    mountAnimationControls(document.getElementById("animationControls"), (action) => clipActions[action]());
 
-    happyButton?.addEventListener(
-        "click",
-        happy
-    );
 
-    neutralButton?.addEventListener(
-        "click",
-        neutral
-    );
 
     stopButton?.addEventListener(
         "click",
         stopEverything
-    );
-
-
-    /**
-     * Press Enter to speak.
-     */
-    speechTextElement?.addEventListener(
-        "keydown",
-        (event) => {
-
-            if (
-                event.key !==
-                "Enter"
-            ) {
-
-                return;
-            }
-
-            event.preventDefault();
-
-            handleSpeak();
-        }
     );
 
 
@@ -1622,6 +1348,13 @@ function initCVConnection() {
         cvSocket.binaryType = "arraybuffer";
 
         cvSocket.onopen = () => {
+            cameraResponses.clear();
+            speakingEvents.cameraReset();
+            gestureEvents.active.clear();
+            latestCVMetadata = null;
+            window.lastCVMetadata = null;
+            window.lastCVWindows = [];
+            window.lastCVKeypoints = null;
             console.log("[CV] Connected to CV adapter WebSocket at", CV_WS_URL);
             updateCVBadge(true);
             updateCVPlaceholder(false);
@@ -1637,8 +1370,25 @@ function initCVConnection() {
             } else if (typeof event.data === "string") {
                 try {
                     const data = JSON.parse(event.data);
-                    if (data.type === "frame" || data.type === "frame_metadata") {
+                    // Keypoint inference completes independently of object boxes.
+                    // Keep its latest result even when this box frame is older.
+                    window.lastCVKeypoints = acceptLandmarkFrame(window.lastCVKeypoints, data);
+                    if (data.event_type === "window_summary") {
+                        const summaries = window.lastCVWindows || [];
+                        const previous = summaries.find((item) => item.window_id === data.summary.window_id);
+                        if (!previous || previous.revision < data.summary.revision) {
+                            window.lastCVWindows = summaries
+                                .filter((item) => item.window_id !== data.summary.window_id)
+                                .concat(data.summary)
+                                .sort((a, b) => a.window_id - b.window_id)
+                                .slice(-30);
+                        }
+                    } else if (data.type === "keypoints") {
+                        // Stored above; the local preview loop draws this result.
+                    } else if (data.type === "frame" || data.type === "frame_metadata") {
+                        if (latestCVMetadata && data.seq < latestCVMetadata.seq) return;
                         latestCVMetadata = data;
+                        window.lastCVMetadata = data;
                         lastMetadataReceivedTime = performance.now();
                         if (data.timestamp) {
                             const tsMs = data.timestamp > 1e11 ? data.timestamp : data.timestamp * 1000;
@@ -1711,109 +1461,38 @@ async function handleCVBinaryFrame(arrayBuffer) {
  * Real-Time Action Mirroring Engine
  * --------------------------------------------------------------------------
  */
-let currentMirroredAction = null;
-let actionDebounceTimer = null;
+const gestureEvents = new GestureEvents();
+let showCVOverlays = true;
 
-function syncActionMirroring(people) {
-    if (!head) return;
-
-    // Detect action of primary person or first person with an action
-    let activeAction = null;
-    if (people && people.length > 0) {
-        for (const p of people) {
-            if (p.actions && p.actions.length > 0) {
-                activeAction = p.actions[0];
-                break;
-            }
-        }
-    }
-
-    if (activeAction) {
-        // Clear any pending debounce to lower the arm
-        if (actionDebounceTimer) {
-            clearTimeout(actionDebounceTimer);
-            actionDebounceTimer = null;
-        }
-
-        if (currentMirroredAction === activeAction) {
-            return; // Continuously holding current mirrored action
-        }
-
-        console.log(`[ActionMirror] Starting mirror: ${activeAction}`);
-        currentMirroredAction = activeAction;
-
-        if (activeAction === "hand_raised") {
-            stopActiveWave(head);
-            head.playGesture("handup", null, true, 400);
-            head.setMood("neutral");
-            setStatus("Mirroring: Hand Raised ✋");
-        } else if (activeAction === "waving") {
-            stopActiveWave(head);
-            head.playGesture("handup", null, true, 400);
-            head.setMood("happy");
-            setStatus("Mirroring: Waving 👋");
-
-            function animateContinuousWave() {
-                if (currentMirroredAction !== "waving") return;
-                const now = performance.now();
-                const angle = Math.sin((now / 1000) * Math.PI * 4.5) * 0.36;
-                if (head.poseDelta && head.poseDelta.props) {
-                    head.poseDelta.props['RightForeArm.quaternion'] = { x: 0, y: 0, z: angle };
-                    head.poseDelta.props['RightHand.quaternion'] = { x: 0, y: 0, z: angle * 0.75 };
-                }
-                activeWaveFrame = requestAnimationFrame(animateContinuousWave);
-            }
-            activeWaveFrame = requestAnimationFrame(animateContinuousWave);
-        } else if (activeAction === "thumbs_up") {
-            stopActiveWave(head);
-            head.playGesture("thumbup", null, true, 400);
-            head.setMood("happy");
-            setStatus("Mirroring: Thumbs Up 👍");
-        } else if (activeAction === "namaste") {
-            stopActiveWave(head);
-            head.playGesture("namaste", null, false, 500);
-            head.setMood("neutral");
-            setStatus("Mirroring: Namaste 🙏");
-        } else if (activeAction === "victory") {
-            stopActiveWave(head);
-            head.playGesture("handup", null, true, 400);
-            head.setMood("happy");
-            setStatus("Mirroring: Victory ✌️");
-        }
-    } else {
-        // No active action on current frame
-        if (currentMirroredAction !== null) {
-            if (!actionDebounceTimer) {
-                actionDebounceTimer = setTimeout(() => {
-                    console.log(`[ActionMirror] Lowering hand / ending: ${currentMirroredAction}`);
-                    currentMirroredAction = null;
-                    stopActiveWave(head);
-                    if (head) {
-                        try {
-                            head.stopGesture(400);
-                            if (head.poseCurrentTemplate && typeof head.setPoseFromTemplate === "function") {
-                                head.setPoseFromTemplate(head.poseCurrentTemplate, 500);
-                            }
-                            head.setMood("neutral");
-                        } catch (err) {
-                            console.debug("[ActionMirror] Gesture stop warning:", err);
-                        }
-                    }
-                    setStatus("Idle");
-                    actionDebounceTimer = null;
-                }, 250);
-            }
-        }
-    }
-}
 
 function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = false) {
-    if (!metadata) return;
-    const people = metadata.people || [];
+    const nowMs = performance.now();
+    const pointFrame = freshLandmarkFrame(window.lastCVKeypoints, nowMs);
+    const landmarkBadge = document.getElementById("cvLandmarkBadge");
+    if (landmarkBadge) landmarkBadge.textContent = landmarkStatus(window.lastCVKeypoints, nowMs);
+    if (showCVOverlays && pointFrame) {
+        drawLandmarkOverlay(ctx, canvasW, canvasH, pointFrame, {
+            mirrored: isMirrored,
+            visibleTrackIds: metadata ? new Set((metadata.people || []).map((person) => person.track_id)) : undefined,
+        });
+    }
+    if (!metadata) {
+            for (const event of speakingEvents.update(null, [], nowMs)) handleCVEvent(event);
+        return;
+    }
+    const recentPoints = pointFrame !== null;
+    const people = (metadata.people || []).map((person) => ({
+        ...person,
+        source_id: metadata.source_id,
+        actions: recentPoints
+            ? pointFrame.keypoints.filter((item) => item.track_id === person.track_id).flatMap((item) => item.gestures)
+            : (person.actions || []),
+    }));
     let activeAction = "None";
 
     // Real-time action mirroring
-    syncActionMirroring(people);
+    for (const event of gestureEvents.update(people, nowMs)) handleCVEvent(event);
+    for (const event of speakingEvents.update(pointFrame, people, nowMs)) handleCVEvent(event);
 
     people.forEach((p) => {
         if (!p.bbox || p.bbox.length < 4) return;
@@ -1828,7 +1507,9 @@ function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = fal
         const isKnown = p.display_name && p.display_name !== "Unknown";
         const primaryColor = isKnown ? "#22c55e" : "#00f0ff";
 
-        // Bounding Box
+        if (!showCVOverlays) return;
+
+        // Bounding box and identity label.
         ctx.strokeStyle = primaryColor;
         ctx.lineWidth = 2.5;
         ctx.strokeRect(drawX, drawY, w, h);
@@ -1837,9 +1518,10 @@ function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = fal
         const nameText = isKnown ? p.display_name : "Unknown";
         const idText = `#t${p.track_id}`;
         let actionBadge = "";
-        if (p.actions && p.actions.length > 0) {
-            actionBadge = ` • [${p.actions.join(", ")}]`;
-            activeAction = p.actions.join(", ");
+        const gestures = p.actions;
+        if (gestures.length > 0) {
+            actionBadge = ` • [${gestures.join(", ")}]`;
+            activeAction = gestures.join(", ");
         }
         const label = `${nameText} (${idText})${actionBadge}`;
 
@@ -1858,7 +1540,7 @@ function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = fal
     });
 
     // Draw detected objects
-    const objects = metadata.objects || [];
+    const objects = showCVOverlays ? (metadata.objects || []) : [];
     objects.forEach((obj) => {
         if (!obj.bbox || obj.bbox.length < 4) return;
         const [x1, y1, x2, y2] = obj.bbox;
@@ -1884,15 +1566,17 @@ function renderCVOverlayCanvas(ctx, canvasW, canvasH, metadata, isMirrored = fal
 
     const badge = document.getElementById("cvStatusBadge");
     if (badge && isFrontendCameraActive) {
-        badge.textContent = `Live (${measuredPreviewFPS} FPS | ${measuredInferenceLatencyMs}ms)`;
+        badge.textContent = "Live";
+        badge.title = `Preview ${measuredPreviewFPS} FPS; inference ${measuredInferenceLatencyMs} ms`;
     }
 
     // Update Track List cards
-    updateTrackListUI(people);
+    if (document.getElementById("cameraDetails")?.open) updateTrackListUI(people);
 }
 
 function renderCVFrame(imgBitmap, metadata) {
     window.lastCVMetadata = metadata;
+    window.lastCVKeypoints = acceptLandmarkFrame(window.lastCVKeypoints, metadata);
     const canvas = document.getElementById("cvCanvas");
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -1933,13 +1617,16 @@ function updateTrackListUI(people) {
     }).join("");
 }
 
-function forwardTranscriptToCV(text) {
-    if (cvSocket && cvSocket.readyState === WebSocket.OPEN) {
-        cvSocket.send(JSON.stringify({
-            type: "transcript",
-            text: text,
-        }));
-    }
+
+let perceptionOverlayTimer;
+function appendPerceptionEvent(message) {
+    console.log(`[CV] ${message}`);
+    const overlay = document.getElementById("perceptionOverlay");
+    if (!overlay) return;
+    clearTimeout(perceptionOverlayTimer);
+    overlay.textContent = message;
+    overlay.hidden = false;
+    perceptionOverlayTimer = setTimeout(() => { overlay.hidden = true; }, 2500);
 }
 
 function handleCVEvent(event) {
@@ -1947,11 +1634,13 @@ function handleCVEvent(event) {
 
     if (event.event_type === "action_detected") {
         handleActionDetected(event);
+    } else if (event.event_type === "speaking") {
+        const message = `${event.display_name} speaking ${event.phase}`;
+        appendPerceptionEvent(message);
     } else if (event.event_type === "action_ended") {
         handleActionEnded(event);
     } else if (event.event_type === "person_renamed") {
-        appendTranscriptUI("avatar", `👋 Pleased to meet you, ${event.new_name}!`);
-        setStatus(`Renamed track to ${event.new_name}`);
+        appendPerceptionEvent(`Name saved: ${event.display_name || event.data?.new_name || "Unknown"}`);
     } else if (event.event_type === "person_identified") {
         if (event.display_name && event.display_name !== "Unknown") {
             setStatus(`Identified: ${event.display_name}`);
@@ -1960,11 +1649,10 @@ function handleCVEvent(event) {
 }
 
 function handleActionDetected(event) {
-    console.log(`[CV] Action detected: ${event.action} from track #${event.track_id}`);
-    if (event.action === "hand_raised") {
-        avatarController.setState(AvatarState.LISTENING);
-        setStatus("Hand raised ✋ — listening...");
-    }
+    const name = event.display_name || `Unknown (track #${event.track_id})`;
+    const message = `${name}: ${event.action === "wave" ? "waving" : event.action}`;
+    appendPerceptionEvent(message);
+    cameraResponses.handle(event);
 }
 
 function handleActionEnded(event) {
@@ -1977,11 +1665,34 @@ function handleActionEnded(event) {
  * --------------------------------------------------------------------------
  */
 
+function updateProviderBadge(info) {
+    const badge = document.getElementById("sttBadge");
+    const provider = info?.stt || info?.stt_provider;
+    const tts = info?.tts || info?.tts_provider;
+    if (tts) { callPreferences.setProvider(tts); refreshCallSettings(); }
+    if (badge && provider) {
+        badge.textContent = `STT: ${provider}`;
+        badge.title = info.stt_model || "";
+    }
+}
+
+async function loadRuntimeInfo() {
+    try {
+        const response = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(2000) });
+        if (!response.ok) throw new Error("Backend health check failed");
+        updateProviderBadge((await response.json()).providers);
+    } catch {
+        const badge = document.getElementById("sttBadge");
+        if (badge) badge.textContent = "STT: unavailable";
+    }
+}
+
 async function bootstrap() {
 
     try {
 
         registerEventHandlers();
+        loadRuntimeInfo();
 
         pushToTalk.attach();
 

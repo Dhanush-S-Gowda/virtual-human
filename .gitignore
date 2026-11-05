@@ -365,3 +365,5 @@ vite.config.ts.timestamp-*
 cv/yolo26n.pt
 cv/yolov8n-pose.pt
 *.pt
+backend/assets/cv/
+backend/data/

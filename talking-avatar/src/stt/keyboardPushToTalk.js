@@ -37,12 +37,14 @@ export class KeyboardPushToTalk {
      * @returns {boolean}
      */
     isEditableTarget(target) {
+        if (globalThis.document?.querySelector?.("dialog[open]")) return true;
         if (!target || !(target instanceof HTMLElement)) {
             return false;
         }
 
         const tagName = target.tagName.toUpperCase();
-        if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT") {
+        if (target.closest?.("dialog[open]")) return true;
+        if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT" || tagName === "BUTTON" || tagName === "SUMMARY" || tagName === "A") {
             return true;
         }
 

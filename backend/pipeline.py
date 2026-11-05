@@ -2,10 +2,13 @@ import asyncio
 import csv
 import json
 import logging
+import uuid
 import os
 import re
 import threading
 from collections import OrderedDict, deque
+from copy import deepcopy
+from contextlib import aclosing
 from collections.abc import AsyncIterator
 from pathlib import Path
 import sys
@@ -20,6 +23,12 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from config import settings
+from diagnostics import bind_session, context, record, scope, traced_turn
+from tts.normalization import normalize_for_tts, sanitize_tts_characters
+from world import current_world
+from llm.tools import MODEL_TOOLS, action_example, execute_tool
+from inline_gestures import InlineGestures, StreamingCueAligner, take_segment_cues
+from tts.voices import resolve_voice
 
 logger = logging.getLogger(__name__)
 _METRICS_FILE = Path(
@@ -50,7 +59,8 @@ def _append_metrics_csv(metrics: dict) -> None:
 def _model_details():
     return {
         "stt_provider": settings.stt_provider,
-        "stt_model": settings.faster_whisper_model,
+        "stt_model": (settings.nemotron_model if settings.stt_provider == "nemotron"
+                      else settings.faster_whisper_model),
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "tts_provider": settings.tts_provider,
@@ -68,14 +78,6 @@ def _format_scene_context(scene: dict) -> str | None:
     speaker = scene.get("active_speaker")
     parts = []
 
-    # If active speaker is missing or Unknown, check if there's any identified person in people
-    identified_people = [
-        p for p in people
-        if p.get("display_name") and p.get("display_name") != "Unknown"
-    ]
-    if (not speaker or not speaker.get("display_name") or speaker.get("display_name") == "Unknown") and identified_people:
-        speaker = identified_people[0]
-
     if speaker and speaker.get("display_name"):
         name = speaker.get("display_name")
         tid = speaker.get("track_id")
@@ -83,10 +85,6 @@ def _format_scene_context(scene: dict) -> str | None:
             parts.append(f"Person currently speaking to you: {name} (Track #{tid})")
         else:
             parts.append(f"Person currently speaking to you: Unknown Person (Track #{tid})")
-    elif identified_people:
-        name = identified_people[0].get("display_name")
-        tid = identified_people[0].get("track_id")
-        parts.append(f"Person currently speaking to you: {name} (Track #{tid})")
 
     if people:
         people_strs = [
@@ -101,6 +99,18 @@ def _format_scene_context(scene: dict) -> str | None:
         obj_strs = [o.get("label", "") for o in objects if o.get("label")]
         if obj_strs:
             parts.append(f"Visible objects: {', '.join(obj_strs)}")
+
+    windows = scene.get("windows", [])
+    if windows:
+        latest = max(windows, key=lambda window: window["window_id"])
+        parts.append(
+            f"Latest perception window {latest['start']:.2f}-{latest['end']:.2f}s "
+            f"(revision {latest['revision']}): {latest['unique_objects']} unique tracked objects; "
+            f"{latest['pending_tasks']} inference tasks pending"
+        )
+        for person in latest.get("people", []):
+            if person.get("gestures"):
+                parts.append(f"Track #{person['track_id']} gestures: {', '.join(person['gestures'])}")
 
     return "; ".join(parts) if parts else None
 
@@ -131,9 +141,16 @@ async def _get_scene_context(client_scene: dict | None = None) -> str | None:
             try:
                 import websockets
                 async with websockets.connect(cv_url, open_timeout=0.2, close_timeout=0.2) as ws:
-                    await ws.send(json.dumps({"type": "get_scene"}))
-                    resp = await asyncio.wait_for(ws.recv(), timeout=0.2)
-                    data = json.loads(resp)
+                    request_id = str(now)
+                    await ws.send(json.dumps({"type": "get_scene", "request_id": request_id}))
+                    async with asyncio.timeout(0.2):
+                        while True:
+                            resp = await ws.recv()
+                            if not isinstance(resp, str):
+                                continue
+                            data = json.loads(resp)
+                            if data.get("type") == "scene" and data.get("request_id") == request_id:
+                                break
                     scene = data.get("data", {})
                     context_str = _format_scene_context(scene)
                     if context_str:
@@ -151,7 +168,7 @@ async def _get_scene_context(client_scene: dict | None = None) -> str | None:
             _SCENE_CACHE["time"] = now
             return fallback_str
 
-    return _SCENE_CACHE.get("context")
+    return None
 
 
 async def _forward_transcript_to_cv(text: str) -> None:
@@ -160,8 +177,6 @@ async def _forward_transcript_to_cv(text: str) -> None:
     if not cv_url or not text.strip():
         return
     cv_url = cv_url.replace("ws://localhost:", "ws://127.0.0.1:")
-    if not _is_ws_available(cv_url):
-        return
     try:
         import websockets
         async with websockets.connect(cv_url, open_timeout=0.2, close_timeout=0.2) as ws:
@@ -170,42 +185,175 @@ async def _forward_transcript_to_cv(text: str) -> None:
         logger.debug("CV adapter transcript forwarding skipped: %s", exc)
 
 
+def _is_current_speaker_question(text):
+    """Only direct current-speaker queries; recordings and other topics stay with the model."""
+    return re.fullmatch(
+        r"\s*(?:(?:do you know|can you tell(?: me)?|tell me)\s+)?"
+        r"who(?:'s|\s+is)\s+(?:speaking|talking)"
+        r"(?:\s+(?:right now|now|to you)){0,2}\s*[?!.]*\s*",
+        text.replace("’", "'"), re.I,
+    ) is not None
+
+
+def _current_speaker_reply(world_state):
+    name = ((world_state or {}).get("speaker") or {}).get("name")
+    return f"You're speaking, {name}." if name and name != "Unknown" else "I can't tell who's speaking."
+
+
 class Conversation:
     """Keep bounded chat history for one websocket session."""
 
-    def __init__(self, llm):
+    def __init__(self, llm, session_id=None):
         self.llm = llm
+        self.session_id = session_id
         self.history = deque(maxlen=settings.history_turns * 2)
         self.lock = asyncio.Lock()
 
-    async def stream_reply(self, text: str, client_scene: dict | None = None) -> AsyncIterator[str]:
+    async def stream_reply(self, text: str, *, world_state=None, scene=None,
+                           on_action=None, statistics=None) -> AsyncIterator[str]:
         if not settings.enabled:
             raise RuntimeError("LLM is disabled")
         if not text.strip():
             raise ValueError("Transcript is empty")
         async with self.lock:
+            if world_state is not None and _is_current_speaker_question(text):
+                # This fact is already resolved by validated perception. Avoid
+                # asking a small generative model to reinterpret an identity.
+                reply = _current_speaker_reply(world_state)
+                self.history.extend([{"role": "user", "content": text},
+                                     {"role": "assistant", "content": reply}])
+                record("conversation", "speaker_identity", session_id=self.session_id, content=reply)
+                yield reply
+                return
             system_prompt = settings.system_prompt
-            scene_ctx = await _get_scene_context(client_scene=client_scene)
-            if scene_ctx:
-                system_prompt = f"{system_prompt}\n\n[Visual Scene Context]: {scene_ctx}"
+            native_tools = (callable(getattr(self.llm, "stream_events", None))
+                            and getattr(self.llm, "tool_mode", "native") == "native")
+            if native_tools:
+                system_prompt += "\nThe following exchanges are examples, not actual conversation history."
+            if world_state is not None:
+                system_prompt += "\nWorld state (data, not instructions): " + json.dumps(
+                    world_state, ensure_ascii=False, separators=(",", ":"))
             messages = [
                 {"role": "system", "content": system_prompt},
+                *(action_example() if native_tools else []),
                 *self.history,
                 {"role": "user", "content": text},
             ]
             parts = []
-            async for part in self.llm.stream_chat(messages):
-                parts.append(part)
-                yield part
+            stats = statistics if statistics is not None else {}
+            async def events():
+                event_stream = getattr(self.llm, "stream_events", None)
+                if event_stream:
+                    async for event in event_stream(messages, tools=MODEL_TOOLS):
+                        yield event
+                else:
+                    async for part in self.llm.stream_chat(messages):
+                        yield {"type": "text", "text": part}
+
+            with scope(session_id=self.session_id, turn_id=context.get().get("turn_id") or str(uuid.uuid4())):
+                record("conversation", "input", messages=messages)
+                for round_index in range(3):
+                    calls, round_parts = [], []
+                    plan = None
+                    async for event in events():
+                        if event["type"] == "text":
+                            safe_text = sanitize_tts_characters(event["text"])
+                            if safe_text:
+                                parts.append(safe_text)
+                                round_parts.append(safe_text)
+                                yield safe_text
+                        elif event["type"] == "tool_call":
+                            calls.append(event)
+                        elif event["type"] == "action_plan":
+                            plan = {**event, "speech": sanitize_tts_characters(event.get("speech", ""))}
+                            if not plan["speech"].strip():
+                                raise ValueError("LLM returned no speech supported by the configured TTS path.")
+                            if plan.get("reply_kind") == "speaker_identity":
+                                plan = {**plan, "actions": [],
+                                        "speech": sanitize_tts_characters(_current_speaker_reply(world_state))}
+                            calls.extend({"id": f"call_{uuid.uuid4().hex}", "name": action["name"],
+                                          "arguments": json.dumps(action["arguments"])}
+                                         for action in plan["actions"])
+                        elif event["type"] == "usage":
+                            usage, timing = event["usage"], event["timings"]
+                            stats.setdefault("requests", []).append({
+                                "prompt_tokens": usage.get("prompt_tokens"),
+                                "output_tokens": usage.get("completion_tokens"),
+                                "ttft_ms": event["ttft_ms"], "prompt_ms": timing.get("prompt_ms"),
+                                "decode_ms": timing.get("predicted_ms"),
+                                "tokens_per_second": timing.get("predicted_per_second"),
+                            })
+                            count = usage.get("completion_tokens")
+                            if isinstance(count, int) and count >= 0:
+                                stats["output_tokens"] = stats.get("output_tokens", 0) + count
+                            stats["decode_ms"] = stats.get("decode_ms", 0) + event["decode_ms"]
+                            stats["ttft_ms"] = stats.get("ttft_ms", event["ttft_ms"])
+                            if timing.get("predicted_per_second") is not None:
+                                stats["server_tokens_per_second"] = timing["predicted_per_second"]
+                            if timing.get("prompt_ms") is not None:
+                                stats["prompt_ms"] = stats.get("prompt_ms", 0) + timing["prompt_ms"]
+                    if not calls:
+                        if plan:
+                            parts.append(plan["speech"])
+                            yield plan["speech"]
+                        break
+                    if round_index == 2:
+                        raise ValueError("LLM exceeded the tool-call round limit.")
+                    assistant = {"role": "assistant", "content": "".join(round_parts) or None,
+                                 "tool_calls": [{"id": call["id"], "type": "function", "function": {
+                                     "name": call["name"], "arguments": call["arguments"]}} for call in calls]}
+                    messages.append(assistant)
+                    results = []
+                    for call in calls:
+                        result = await execute_tool(call["name"], call["arguments"], scene or {},
+                                                    on_action or _ignore_action,
+                                                    speaker=(world_state or {}).get("speaker"), user_text=text)
+                        result_message = {"role": "tool", "tool_call_id": call["id"],
+                                          "content": json.dumps(result, ensure_ascii=False)}
+                        messages.append(result_message)
+                        results.append(result)
+                    if plan and all(result.get("ok") for result in results):
+                        # Dispatch precedes acknowledgement. Failed plans get
+                        # tool feedback on the next bounded model round instead.
+                        parts.append(plan["speech"])
+                        yield plan["speech"]
+                        break
+                record("conversation", "output", content="".join(parts).strip())
             reply = "".join(parts).strip()
             if not reply:
                 raise ValueError("LLM returned an empty reply")
             self.history.extend(
                 [
                     {"role": "user", "content": text},
+                    # Tool results are used within this turn; history stores the
+                    # spoken conclusion, avoiding orphaned tool IDs when trimmed.
                     {"role": "assistant", "content": reply},
                 ]
             )
+
+
+async def _ignore_action(event):
+    pass
+
+
+class ConversationManager:
+    """Conversation ownership is separate from the CV capture-window manager."""
+    def __init__(self, llm, sessions=None):
+        self.llm = llm
+        self.sessions = sessions if sessions is not None else OrderedDict()
+        self.recent_turns = deque(maxlen=128)
+
+    def record_turn(self, session_id, metrics):
+        """Retain bounded timing results separately from CV capture windows."""
+        self.recent_turns.append({"session_id": session_id, **deepcopy(metrics)})
+
+    def get(self, session_id):
+        if session_id not in self.sessions:
+            if len(self.sessions) >= 128:
+                self.sessions.popitem(last=False)
+            self.sessions[session_id] = Conversation(self.llm, session_id=session_id)
+        self.sessions.move_to_end(session_id)
+        return self.sessions[session_id]
 
 
 _ABBREVIATIONS = {
@@ -274,9 +422,50 @@ def _split_ready_segments(buffer: str, force: bool = False) -> tuple[list[str], 
 
 
 
+async def _finish_live_transcript(websocket, stream):
+    """Stop upstream finalization if the browser cancels or disconnects."""
+    async def wait_for_cancel():
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        command = json.loads(message.get("text") or "{}")
+        if isinstance(command, dict) and command.get("type") == "cancel":
+            await websocket.send_json({"type": "cancelled"})
+            await websocket.close()
+            return
+        raise ValueError("Expected cancel while finalizing audio.")
+
+    finalizing = asyncio.create_task(stream.finish())
+    cancelled = asyncio.create_task(wait_for_cancel())
+    try:
+        done, _ = await asyncio.wait((finalizing, cancelled), return_when=asyncio.FIRST_COMPLETED)
+        if cancelled in done:
+            cancelled.result()
+            return None
+        return finalizing.result()
+    finally:
+        for task in (finalizing, cancelled):
+            task.cancel()
+        await asyncio.gather(finalizing, cancelled, return_exceptions=True)
+
+
+async def _synthesize_chunks(provider, text, voice, speed):
+    stream = getattr(provider, "stream_synthesize", None)
+    if stream is None:
+        yield await provider.synthesize_segment(text, voice, speed)
+    else:
+        async with aclosing(stream(text, voice, speed)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+
+@traced_turn
 async def handle_websocket(websocket: Any):
     await websocket.accept()
     started = perf_counter()
+    released_at = started
+    stt_stream = None
+    utterance_world_task = None
     try:
         first = await websocket.receive_json()
         if not isinstance(first, dict) or first.get("type") != "start":
@@ -287,8 +476,9 @@ async def handle_websocket(websocket: Any):
             return
 
         session_id = str(first.get("session_id", "default"))[:128] or "default"
+        bind_session(session_id)
         mime_type = str(first.get("mime_type", "audio/webm"))[:100]
-        voice = str(first.get("voice", settings.tts_voice))[:100]
+        voice = resolve_voice(settings.tts_provider, first.get("voice"))
         speed = float(first.get("speed", settings.tts_speed))
         provided_text = str(first.get("text", "")).strip()
         mode = str(first.get("mode", "conversation"))
@@ -312,33 +502,40 @@ async def handle_websocket(websocket: Any):
             return
 
         if mode == "speak":
+            provided_text = normalize_for_tts(provided_text)
             if not provided_text:
                 await websocket.send_json(
                     {
                         "type": "error",
-                        "message": "Text input is required for speak mode.",
+                        "message": "Speak mode requires text with spoken words or numbers after normalization.",
                     }
                 )
                 await websocket.close(code=1008)
                 return
             tts_started = perf_counter()
-            result = await websocket.app.state.providers.tts.synthesize_segment(
-                provided_text, voice, speed
-            )
+            first_audio = None
+            audio_chunks = 0
+            async with aclosing(_synthesize_chunks(
+                websocket.app.state.providers.tts, provided_text, voice, speed
+            )) as chunks:
+                async for result in chunks:
+                    if first_audio is None:
+                        first_audio = perf_counter()
+                    payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+                    await websocket.send_json(
+                        {"type": "speech", "index": 0, "chunk_index": audio_chunks,
+                         "text": provided_text, **payload}
+                    )
+                    audio_chunks += 1
             tts_ms = round((perf_counter() - tts_started) * 1000, 2)
-            payload = (
-                result.model_dump() if hasattr(result, "model_dump") else result.dict()
-            )
-            await websocket.send_json(
-                {"type": "speech", "index": 0, "text": provided_text, **payload}
-            )
             metrics = {
                 "stt_total_ms": None,
                 "llm_ttft_ms": None,
-                "tts_ttfb_ms": tts_ms,
+                "tts_ttfb_ms": round((first_audio - tts_started) * 1000, 2) if first_audio else None,
                 "first_speech_end_to_end_ms": round(
-                    (perf_counter() - started) * 1000, 2
-                ),
+                    (first_audio - started) * 1000, 2
+                ) if first_audio else None,
+                "tts_audio_chunks": audio_chunks,
                 "tts_segment_ms": [tts_ms],
                 "tts_segments": 1,
                 "end_to_end_ms": round((perf_counter() - started) * 1000, 2),
@@ -352,15 +549,22 @@ async def handle_websocket(websocket: Any):
             await websocket.send_json({"type": "done"})
             return
         sessions: OrderedDict = websocket.app.state.conversations
-        if session_id not in sessions:
-            if len(sessions) >= 128:
-                sessions.popitem(last=False)
-            sessions[session_id] = Conversation(websocket.app.state.providers.llm)
-        sessions.move_to_end(session_id)
+        manager = getattr(websocket.app.state, "conversation_manager", None)
+        if manager is None:
+            manager = ConversationManager(websocket.app.state.providers.llm, sessions)
+            websocket.app.state.conversation_manager = manager
+        manager.get(session_id)
 
-        client_scene = first.get("client_scene") or first.get("scene")
         audio_parts = []
         audio_size = 0
+        speaker_hint = first.get("speaker")
+        sample_rate = first.get("sample_rate", 16000)
+        if mime_type == "audio/pcm":
+            if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or not 8000 <= sample_rate <= 96000:
+                raise ValueError("PCM sample_rate must be an integer between 8000 and 96000 Hz.")
+            open_stream = getattr(websocket.app.state.providers.stt, "open_stream", None)
+            if open_stream is not None and not provided_text:
+                stt_stream = await open_stream(sample_rate)
         if not provided_text:
             while True:
                 message = await websocket.receive()
@@ -378,15 +582,23 @@ async def handle_websocket(websocket: Any):
                         )
                         await websocket.close(code=1009)
                         return
-                    audio_parts.append(chunk)
+                    if mime_type == "audio/pcm" and len(chunk) % 2:
+                        raise ValueError("PCM16 audio must contain complete 16-bit samples.")
+                    if stt_stream is not None:
+                        await stt_stream.send_audio(chunk)
+                    else:
+                        audio_parts.append(chunk)
                     continue
                 if message.get("text") is not None:
                     import json
 
                     command = json.loads(message["text"])
                     if isinstance(command, dict) and command.get("type") == "end":
-                        if command.get("client_scene"):
-                            client_scene = command.get("client_scene")
+                        released_at = perf_counter()
+                        speaker_hint = command.get("speaker", speaker_hint)
+                        # Preserve who spoke at release even if finalization is
+                        # slow and they leave before the LLM request begins.
+                        utterance_world_task = asyncio.create_task(current_world(speaker_hint))
                         break
                     if isinstance(command, dict) and command.get("type") == "cancel":
                         await websocket.send_json({"type": "cancelled"})
@@ -399,16 +611,39 @@ async def handle_websocket(websocket: Any):
                         }
                     )
 
-        metrics: dict[str, Any] = {"audio_bytes": audio_size}
+        metrics: dict[str, Any] = {"audio_bytes": audio_size,
+                                   "recording_ms": round((released_at - started) * 1000, 2)}
         if provided_text:
             text = provided_text
             metrics["stt_total_ms"] = None
-        elif audio_parts:
+        elif audio_size:
             stt_started = perf_counter()
-            transcript = await websocket.app.state.providers.stt.transcribe(
-                b"".join(audio_parts), mime_type
-            )
+            if stt_stream is not None:
+                transcript = await _finish_live_transcript(websocket, stt_stream)
+                if transcript is None:
+                    return
+                await stt_stream.close()
+                stt_stream = None
+            else:
+                audio = b"".join(audio_parts)
+                if mime_type == "audio/pcm":
+                    from io import BytesIO
+                    import wave
+
+                    output = BytesIO()
+                    with wave.open(output, "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(sample_rate)
+                        wav.writeframes(audio)
+                    audio = output.getvalue()
+                    mime_type = "audio/wav"
+                transcript = await websocket.app.state.providers.stt.transcribe(audio, mime_type)
             metrics["stt_total_ms"] = round((perf_counter() - stt_started) * 1000, 2)
+            record("stt", "transcription", provider=settings.stt_provider, transcript=transcript,
+                   duration_ms=metrics["stt_total_ms"])
+            if transcript.get("stream_metrics"):
+                metrics["stt_stream"] = transcript["stream_metrics"]
             text = str(transcript.get("text", "")).strip()
         else:
             await websocket.send_json(
@@ -420,7 +655,8 @@ async def handle_websocket(websocket: Any):
             {"type": "transcript", "text": text, "language": "en"}
         )
         logger.info("User transcript: %s", text)
-        asyncio.create_task(_forward_transcript_to_cv(text))
+        # Name changes are validated model tools, rather than a competing
+        # asynchronous transcript renamer with different speaker evidence.
         if not text:
             metrics.update(
                 {
@@ -433,85 +669,95 @@ async def handle_websocket(websocket: Any):
                 }
             )
             _append_metrics_csv(metrics)
+            manager.record_turn(session_id, metrics)
             logger.info("Conversation metrics metrics=%s", metrics)
             await websocket.send_json({"type": "metrics", "metrics": metrics})
             await websocket.send_json({"type": "done"})
             return
 
+        world_started = perf_counter()
+        world_state, scene_snapshot = await current_world(speaker_hint)
+        if utterance_world_task is not None:
+            utterance_state, _ = await utterance_world_task
+            if world_state["speaker"] is None and utterance_state["speaker"] is not None:
+                world_state["speaker"] = utterance_state["speaker"]
+        metrics["world_context_ms"] = round((perf_counter() - world_started) * 1000, 2)
         llm_started = perf_counter()
+        llm_statistics = {}
         llm_ttft = None
         tts_first_byte = None
         tts_first_call_ms = None
         tts_task_errors = []
         speech_queue: asyncio.Queue = asyncio.Queue()
 
-        async def synthesize_segment(segment_index, segment_text):
+        async def synthesize_segment(segment_index, segment_text, raw_text, cues, output):
             tts_started = perf_counter()
+            record("tts", "synthesis_start", segment_index=segment_index,
+                   text=segment_text, provider=settings.tts_provider)
             try:
-                result = await websocket.app.state.providers.tts.synthesize_segment(
-                    segment_text, voice, speed
-                )
-                payload = (
-                    result.model_dump()
-                    if hasattr(result, "model_dump")
-                    else result.dict()
-                )
-                return segment_index, segment_text, payload, tts_started, None
+                aligner = StreamingCueAligner(raw_text, cues)
+                chunk_index = 0
+                gestures = []
+                quality = "estimated" if settings.tts_provider == "supertonic" else "provider"
+                async with aclosing(_synthesize_chunks(
+                    websocket.app.state.providers.tts, segment_text, voice, speed
+                )) as chunks:
+                    async for result in chunks:
+                        payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+                        payload["gestures"] = aligner.feed(payload)
+                        payload["gesture_timing_quality"] = quality
+                        gestures.extend(payload["gestures"])
+                        await output.put((segment_index, chunk_index, segment_text, payload, tts_started, None))
+                        chunk_index += 1
+                record("tts", "synthesis_end", segment_index=segment_index, text=segment_text,
+                       gestures=gestures, timing_quality=quality, audio_chunks=chunk_index,
+                       duration_ms=round((perf_counter() - tts_started) * 1000, 2), status="ok")
+                metrics.setdefault("tts_segment_ms", []).append(
+                    round((perf_counter() - tts_started) * 1000, 2))
             except Exception as exc:
+                record("tts", "synthesis_end", segment_index=segment_index, status="error",
+                       duration_ms=round((perf_counter() - tts_started) * 1000, 2), error=str(exc))
                 logger.exception("TTS segment failed")
-                return segment_index, segment_text, None, tts_started, exc
+                await output.put((segment_index, 0, segment_text, None, tts_started, exc))
+            await output.put(None)
 
-        async def send_synthesized(task):
+        async def send_synthesized(item):
             nonlocal tts_first_byte, tts_first_call_ms
-            segment_index, segment_text, payload, tts_started, error = await task
+            segment_index, chunk_index, segment_text, payload, tts_started, error = item
             if error is not None:
                 tts_task_errors.append(str(error))
-                try:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "stage": "tts",
-                            "message": "Speech synthesis failed for a response segment.",
-                        }
-                    )
-                except Exception:
-                    pass
+                await websocket.send_json(
+                    {"type": "error", "stage": "tts",
+                     "message": "Speech synthesis failed for a response segment."})
                 return
             if tts_first_byte is None:
                 tts_first_byte = perf_counter()
                 tts_first_call_ms = round((tts_first_byte - tts_started) * 1000, 2)
-            try:
-                await websocket.send_json(
-                    {
-                        "type": "speech",
-                        "index": segment_index,
-                        "text": segment_text,
-                        **payload,
-                    }
-                )
-            except Exception:
-                pass
-            metrics.setdefault("tts_segment_ms", []).append(
-                round((perf_counter() - tts_started) * 1000, 2)
+            await websocket.send_json(
+                {"type": "speech", "index": segment_index,
+                 "chunk_index": chunk_index, "text": segment_text, **payload}
             )
+            metrics["tts_audio_chunks"] = metrics.get("tts_audio_chunks", 0) + 1
 
         async def synthesize_queue():
             concurrency = max(1, int(settings.tts_max_concurrent_segments))
             sem = asyncio.Semaphore(concurrency)
             active_tasks = {}
+            producers = set()
             next_to_send = 0
             done_event = asyncio.Event()
 
-            async def bounded_synthesize(idx, seg_text):
+            async def bounded_synthesize(idx, seg_text, raw_text, cues, output):
                 async with sem:
-                    return await synthesize_segment(idx, seg_text)
+                    await synthesize_segment(idx, seg_text, raw_text, cues, output)
 
             async def sender():
                 nonlocal next_to_send
                 while True:
                     if next_to_send in active_tasks:
-                        task = active_tasks.pop(next_to_send)
-                        await send_synthesized(task)
+                        output = active_tasks.pop(next_to_send)
+                        while (item := await output.get()) is not None:
+                            await send_synthesized(item)
                         next_to_send += 1
                     elif done_event.is_set() and not active_tasks:
                         break
@@ -519,43 +765,79 @@ async def handle_websocket(websocket: Any):
                         await asyncio.sleep(0.005)
 
             sender_task = asyncio.create_task(sender())
-            while True:
-                item = await speech_queue.get()
-                try:
-                    if item is None:
-                        done_event.set()
-                        break
-                    idx, seg_text = item
-                    active_tasks[idx] = asyncio.create_task(bounded_synthesize(idx, seg_text))
-                finally:
-                    speech_queue.task_done()
-            await sender_task
+            try:
+                while True:
+                    item = await speech_queue.get()
+                    try:
+                        if item is None:
+                            done_event.set()
+                            break
+                        idx, seg_text, raw_text, cues = item
+                        output = asyncio.Queue(maxsize=2)
+                        active_tasks[idx] = output
+                        task = asyncio.create_task(bounded_synthesize(idx, seg_text, raw_text, cues, output))
+                        producers.add(task)
+                        task.add_done_callback(producers.discard)
+                    finally:
+                        speech_queue.task_done()
+                await sender_task
+            finally:
+                sender_task.cancel()
+                pending = [sender_task, *producers]
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
         tts_worker = asyncio.create_task(synthesize_queue())
         reply_parts, text_buffer = [], ""
         segment_index = 0
+        inline = InlineGestures()
+        buffer_origin = 0
+
+        async def queue_ready(force=False):
+            nonlocal text_buffer, buffer_origin, segment_index
+            original = text_buffer
+            ready, remaining = _split_ready_segments(original, force=force)
+            cursor = 0
+            for segment in ready:
+                start = original.index(segment, cursor)
+                cursor = start + len(segment)
+                cues = take_segment_cues(inline, buffer_origin + start, segment)
+                speech_text = normalize_for_tts(segment)
+                if speech_text:
+                    await speech_queue.put((segment_index, speech_text, segment, cues))
+                    segment_index += 1
+            buffer_origin += len(original) - len(remaining)
+            text_buffer = remaining
         try:
-            async for delta in sessions[session_id].stream_reply(text, client_scene=client_scene):
+            async for delta in sessions[session_id].stream_reply(
+                text, world_state=world_state, scene=scene_snapshot,
+                on_action=websocket.send_json, statistics=llm_statistics,
+            ):
                 now = perf_counter()
                 if llm_ttft is None:
                     llm_ttft = round((now - llm_started) * 1000, 2)
-                reply_parts.append(delta)
-                text_buffer += delta
-                await websocket.send_json({"type": "llm_delta", "text": delta})
-                ready, text_buffer = _split_ready_segments(text_buffer)
-                for segment in ready:
-                    await speech_queue.put((segment_index, segment))
-                    segment_index += 1
-            ready, text_buffer = _split_ready_segments(text_buffer, force=True)
-            for segment in ready:
-                await speech_queue.put((segment_index, segment))
-                segment_index += 1
-        finally:
+                clean = inline.feed(delta)
+                reply_parts.append(clean)
+                text_buffer += clean
+                if clean:
+                    await websocket.send_json({"type": "llm_delta", "text": clean})
+                await queue_ready()
+            llm_finished = perf_counter()
+            inline.finish()
+            await queue_ready(force=True)
+            record("conversation", "inline_gestures", rejected=inline.rejected,
+                   unanchored=len(inline.cues))
+        except BaseException:
+            tts_worker.cancel()
+            await asyncio.gather(tts_worker, return_exceptions=True)
+            raise
+        else:
             await speech_queue.put(None)
             await tts_worker
 
         metrics["llm_ttft_ms"] = llm_ttft
-        metrics["llm_total_ms"] = round((perf_counter() - llm_started) * 1000, 2)
+        metrics["llm_total_ms"] = round((llm_finished - llm_started) * 1000, 2)
         metrics["tts_ttfb_ms"] = tts_first_call_ms
         metrics["first_speech_end_to_end_ms"] = (
             round((tts_first_byte - started) * 1000, 2) if tts_first_byte else None
@@ -564,18 +846,23 @@ async def handle_websocket(websocket: Any):
         metrics["end_to_end_ms"] = round((perf_counter() - started) * 1000, 2)
         metrics["status"] = "partial_tts_failure" if tts_task_errors else "ok"
         reply = "".join(reply_parts).strip()
-        # The OpenAI-compatible streaming response does not expose usage data;
-        # estimate tokens at roughly four UTF-8 bytes per token.
-        estimated_tokens = round(len(reply.encode("utf-8")) / 4)
         metrics.update(_model_details())
-        metrics["llm_tokens_per_second"] = (
-            round(estimated_tokens / (metrics["llm_total_ms"] / 1000), 2)
-            if metrics["llm_total_ms"]
-            else None
-        )
+        metrics["llm_output_tokens"] = llm_statistics.get("output_tokens")
+        metrics["llm_requests"] = llm_statistics.get("requests", [])
+        metrics["llm_prompt_ms"] = llm_statistics.get("prompt_ms")
+        metrics["llm_decode_ms"] = llm_statistics.get("decode_ms")
+        metrics["llm_tokens_per_second"] = llm_statistics.get("server_tokens_per_second")
+        metrics["llm_tokens_per_second_source"] = (
+            "server_last_response" if metrics["llm_tokens_per_second"] is not None else "unavailable")
+        metrics["post_release_ms"] = round((perf_counter() - released_at) * 1000, 2)
+        metrics["first_speech_after_release_ms"] = (
+            round((tts_first_byte - released_at) * 1000, 2) if tts_first_byte else None)
+        metrics["llm_output_bytes"] = len(reply.encode("utf-8"))
+        record("conversation", "turn_metrics", metrics=metrics)
         _append_metrics_csv(metrics)
+        manager.record_turn(session_id, metrics)
         logger.info(
-            "Final LLM response: %s | estimated_tokens_per_second=%s | segments=%s",
+            "Final LLM response: %s | server_tokens_per_second=%s | segments=%s",
             reply,
             metrics["llm_tokens_per_second"],
             segment_index,
@@ -586,7 +873,10 @@ async def handle_websocket(websocket: Any):
     except WebSocketDisconnect:
         logger.info("Conversation websocket disconnected")
     except Exception as exc:
-        logger.exception("Conversation pipeline failed")
+        if isinstance(exc, ValueError):
+            logger.warning("Conversation request failed: %s", exc)
+        else:
+            logger.exception("Conversation pipeline failed")
         try:
             await websocket.send_json(
                 {
@@ -599,3 +889,9 @@ async def handle_websocket(websocket: Any):
             await websocket.close(code=1011)
         except Exception:
             pass
+    finally:
+        if stt_stream is not None:
+            await stt_stream.close()
+        if utterance_world_task is not None:
+            utterance_world_task.cancel()
+            await asyncio.gather(utterance_world_task, return_exceptions=True)

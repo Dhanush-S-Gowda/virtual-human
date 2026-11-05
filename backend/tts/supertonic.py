@@ -11,7 +11,9 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from config import settings
+from diagnostics import traced_stage
 from schemas import SynthesizeResponse
+from runtime import ModelWorker, onnx_options
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 ONNX_DIR = BACKEND_DIR / "supertonic/assets/onnx"
@@ -24,19 +26,16 @@ def _load_model():
     from supertonic.py import helper
 
     device = str(settings.tts_device).strip().lower()
-    if device == "cpu":
-        logger.info("Loading Supertonic with CPUExecutionProvider")
-        return helper.load_text_to_speech(str(ONNX_DIR), use_gpu=False)
-    if device not in {"auto", "gpu"}:
+    if device not in {"auto", "gpu", "cpu"}:
         raise ValueError("tts_device must be 'auto', 'gpu', or 'cpu'.")
 
     import onnxruntime as ort
 
     available = set(ort.get_available_providers())
     providers = []
-    if "CUDAExecutionProvider" in available:
+    if device != "cpu" and "CUDAExecutionProvider" in available:
         providers.append("CUDAExecutionProvider")
-    if "OpenVINOExecutionProvider" in available:
+    if device != "cpu" and "OpenVINOExecutionProvider" in available:
         try:
             import ctypes
             ctypes.cdll.LoadLibrary("openvino.dll")
@@ -45,7 +44,7 @@ def _load_model():
             pass
     providers.append("CPUExecutionProvider")
 
-    options = ort.SessionOptions()
+    options = onnx_options(settings, "tts")
     cfgs = helper.load_cfgs(str(ONNX_DIR))
     sessions = helper.load_onnx_all(str(ONNX_DIR), options, providers)
     text_processor = helper.load_text_processor(str(ONNX_DIR))
@@ -64,29 +63,13 @@ def _load_style(style_path: str):
 
 
 def _resolve_style(voice: str) -> Path:
-    """Resolve Supertonic style names while preserving Kokoro voice compatibility."""
-    candidate = Path(voice).expanduser()
-    if candidate.is_file():
-        return candidate.resolve()
-
-    style_name = candidate.stem if candidate.suffix.lower() == ".json" else voice
-    if re.fullmatch(r"[FM]\d+", style_name, flags=re.IGNORECASE):
-        style_path = (
-            BACKEND_DIR
-            / "supertonic/assets/voice_styles"
-            / f"{style_name.upper()}.json"
-        )
-        if style_path.is_file():
-            return style_path
-
-    # Kokoro voice IDs (for example af_bella) are not style paths. Use the
-    # configured Supertonic style so existing callers need no provider changes.
-    configured = Path(settings.tts_supertonic_voice_style).expanduser()
-    if not configured.is_absolute():
-        configured = BACKEND_DIR / configured
-    if not configured.is_file():
-        raise FileNotFoundError(f"Supertonic voice style does not exist: {configured}")
-    return configured.resolve()
+    """Resolve one of the supported frontend-selected voice styles."""
+    if voice not in {"F1", "M1"}:
+        raise ValueError("Choose a Supertonic voice: F1, M1.")
+    style_path = BACKEND_DIR / "supertonic/assets/voice_styles" / f"{voice}.json"
+    if not style_path.is_file():
+        raise FileNotFoundError(f"Supertonic voice style does not exist: {style_path}")
+    return style_path.resolve()
 
 
 def _approximate_word_timings(
@@ -110,6 +93,7 @@ def _approximate_word_timings(
     return words, times, durations
 
 
+@traced_stage("tts.supertonic")
 def _synthesize(text: str, voice: str, speed: float) -> SynthesizeResponse:
     import numpy as np
     import soundfile as sf
@@ -118,7 +102,7 @@ def _synthesize(text: str, voice: str, speed: float) -> SynthesizeResponse:
     model = _load_model()
     style = _load_style(str(style_path))
     language = settings.tts_language
-    steps = max(int(settings.tts_supertonic_steps), 5)
+    steps = max(int(settings.tts_supertonic_steps), 1)
 
     audio_batch, durations = model(text, language, style, steps, speed)
 
@@ -154,14 +138,21 @@ def _synthesize(text: str, voice: str, speed: float) -> SynthesizeResponse:
 
 
 def _initialize_model() -> None:
-    """Load the ONNX model and configured voice style before serving."""
+    """Load the ONNX model and both available voice styles before serving."""
     _load_model()
-    _load_style(str(_resolve_style(settings.tts_voice)))
+    for voice in ("F1", "M1"):
+        _load_style(str(_resolve_style(voice)))
 
 
 class SupertonicProvider:
+    def __init__(self):
+        self._worker = ModelWorker(settings, "tts")
+
     async def initialize(self) -> None:
-        await asyncio.to_thread(_initialize_model)
+        await self._worker.run(_initialize_model)
+
+    async def close(self):
+        await self._worker.close()
 
     async def synthesize_segment(
         self, text: str, voice: str, speed: float
@@ -175,7 +166,7 @@ class SupertonicProvider:
                 detail="Speech speed must be greater than zero.",
             )
         try:
-            return await asyncio.to_thread(_synthesize, text, voice, speed)
+            return await self._worker.run(_synthesize, text, voice, speed)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except Exception as exc:

@@ -1,4 +1,11 @@
+import base64
+import binascii
+import io
+import json
 import logging
+import wave
+from collections.abc import AsyncIterator
+from math import isfinite
 from typing import Any
 
 import httpx
@@ -178,9 +185,84 @@ async def synthesize_segment(text: str, voice: str, speed: float) -> SynthesizeR
 
 
 class KokoroProvider:
+    def __init__(self):
+        self._client = None
+
     async def initialize(self) -> None:
-        """The remote Kokoro service owns its model loading lifecycle."""
-        return None
+        """Reuse the HTTP connection; the service owns model loading."""
+        self._get_client()
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=KOKORO_TIMEOUT_SECONDS)
+        return self._client
+
+    async def close(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def stream_synthesize(
+        self, text: str, voice: str, speed: float
+    ) -> AsyncIterator[SynthesizeResponse]:
+        """Yield playable WAV chunks with times relative to each chunk.
+
+        Kokoro sends one continuous audio stream, not independent WAV files.
+        Request PCM and wrap each piece so existing avatar playback can decode it.
+        Provider timestamps are relative to the whole request, in seconds.
+        """
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty.")
+        sample_rate = 24000  # Kokoro's native mono, signed 16-bit PCM output.
+        samples = 0
+        emitted = False
+        try:
+            async with self._get_client().stream(
+                "POST", f"{settings.tts_url}/dev/captioned_speech",
+                json={"model": "kokoro", "input": text.strip(), "voice": voice,
+                      "speed": speed, "response_format": "pcm", "stream": True},
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if not isinstance(data, dict) or not isinstance(data.get("audio"), str):
+                            raise ValueError("Kokoro stream is missing audio.")
+                        if data.get("audio_format") != "audio/pcm":
+                            raise ValueError("Kokoro stream did not return PCM audio.")
+                        audio = base64.b64decode(data["audio"], validate=True)
+                        if not audio:
+                            continue
+                        if len(audio) % 2:
+                            raise ValueError("Kokoro returned incomplete PCM samples.")
+                        words, times, durations = validate_timestamps(data.get("timestamps"))
+                        if not all(isfinite(value) and value >= 0 for value in [*times, *durations]):
+                            raise ValueError("Kokoro returned invalid word times.")
+                    except (ValueError, binascii.Error) as exc:
+                        raise HTTPException(status_code=502, detail=f"Invalid Kokoro stream: {exc}") from exc
+                    origin_ms = samples * 1000 / sample_rate
+                    buffer = io.BytesIO()
+                    with wave.open(buffer, "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(sample_rate)
+                        wav.writeframes(audio)
+                    samples += len(audio) // 2
+                    emitted = True
+                    yield SynthesizeResponse(
+                        audio_base64=base64.b64encode(buffer.getvalue()).decode("ascii"),
+                        audio_encoding="wav", words=words,
+                        wtimes=[max(0.0, time - origin_ms) for time in times],
+                        wdurations=durations, sample_rate=sample_rate,
+                    )
+            if not emitted:
+                raise HTTPException(status_code=502, detail="Kokoro returned an empty audio stream.")
+        except httpx.TimeoutException as exc:
+            raise HTTPException(status_code=504, detail="Kokoro synthesis timed out.") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Kokoro streaming request failed.") from exc
 
     async def synthesize_segment(
         self, text: str, voice: str, speed: float

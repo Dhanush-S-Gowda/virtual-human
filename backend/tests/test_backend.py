@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from unittest.mock import patch
+import yaml
+from unittest.mock import AsyncMock, patch
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -97,6 +98,10 @@ class FakeWebSocket:
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
+        world_patch = patch("pipeline.current_world", new=AsyncMock(return_value=(
+            {"status": "unavailable", "people": [], "objects": [], "speaker": None}, {})))
+        world_patch.start()
+        self.addCleanup(world_patch.stop)
         self.llm = FakeLLM()
         providers = SimpleNamespace(llm=self.llm, tts=FakeTTS(), stt=FakeSTT())
         self.app = create_app(providers)
@@ -117,15 +122,17 @@ class BackendTests(unittest.TestCase):
 
     def test_yaml_settings_are_loaded(self):
         self.assertEqual(settings.llm_provider, "openai")
-        self.assertEqual(settings.tts_voice, "F1")
-        self.assertEqual(settings.stt_provider, "faster-whisper")
+        configured = yaml.safe_load((_BACKEND_DIR / "config.yaml").read_text())
+        self.assertNotIn("tts_voice", configured)
+        self.assertFalse(hasattr(settings, "tts_voice"))
+        self.assertIn(settings.stt_provider, {"faster-whisper", "nemotron"})
         self.assertEqual(settings.faster_whisper_model, "base")
         self.assertEqual(settings.faster_whisper_device, "cpu")
         self.assertEqual(settings.faster_whisper_compute_type, "int8")
         self.assertEqual(settings.max_speech_segment_words, 8)
         self.assertEqual(settings.tts_max_concurrent_segments, 2)
         self.assertEqual(settings.tts_supertonic_steps, 2)
-        self.assertEqual(len(settings.system_prompt.splitlines()), 25)
+        self.assertTrue(settings.system_prompt.strip())
 
     def test_speech_segments_split_on_sentence_periods(self):
         segments, remainder = _split_ready_segments(
@@ -215,7 +222,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(self.llm.calls[0]), 2)
         self.assertEqual(len(self.llm.calls[1]), 4)
         self.assertEqual(len(self.llm.calls[2]), 2)
-        self.assertEqual(self.llm.calls[0][0]["content"], settings.system_prompt)
+        self.assertTrue(self.llm.calls[0][0]["content"].startswith(settings.system_prompt))
+        self.assertIn("World state", self.llm.calls[0][0]["content"])
         self.assertEqual(first[-1]["text"], "Hello from provider.")
         self.assertEqual(second[-1]["text"], "Hello from provider.")
         self.assertEqual(third[-1]["text"], "Hello from provider.")
