@@ -49,14 +49,14 @@ try {
     if ($dockerCmd) {
         Write-Host "`n[*] Pulling Kokoro TTS Docker image (CPU)..." -ForegroundColor Yellow
         try {
-            & docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest
+            & docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2
         }
         catch {
             Write-Host "Warning: Docker daemon not running or pull failed, skipping Kokoro pull." -ForegroundColor Yellow
         }
     }
     else {
-        Write-Host "`n[*] Docker not found. If using Kokoro TTS, pull: docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest" -ForegroundColor Gray
+        Write-Host "`n[*] Docker not found. If using Kokoro TTS, pull: docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2" -ForegroundColor Gray
     }
 
     # ── 2. Computer Vision Models ─────────────────────────────────

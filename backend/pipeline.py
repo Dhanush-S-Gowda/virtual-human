@@ -36,21 +36,76 @@ _METRICS_FILE = Path(
 )
 _METRICS_LOCK = threading.Lock()
 _METRICS_FIELDS = [
-    "stt_provider", "stt_model", "llm_provider", "llm_model",
-    "tts_provider", "tts_model", "stt_total_ms", "llm_ttft_ms",
-    "llm_total_ms", "llm_tokens_per_second", "tts_ttfb_ms",
-    "first_speech_end_to_end_ms", "end_to_end_ms", "audio_bytes",
-    "tts_segments", "status",
+    "stt_provider", "stt_model", "llm_provider", "llm_model", "tts_provider", "tts_model",
+    "recording_ms", "release_to_transcript_ms", "transcript_to_reply_ms",
+    "llm_first_token_ms", "llm_gesture_parse_ms", "gesture_cue_assignment_ms",
+    "gesture_audio_alignment_ms", "tts_text_buffer_ms", "tts_queue_wait_ms",
+    "kokoro_queue_wait_ms", "kokoro_first_pcm_ms", "kokoro_total_ms",
+    "release_to_first_audio_chunk_ms", "turn_total_ms", "audio_bytes",
+    "tts_segments", "response_segments_json", "tts_audio_chunks", "gesture_rejected_tags", "status",
 ]
+
+
+def _ensure_metrics_csv_schema() -> None:
+    """Migrate old metrics into a compact, stage-based schema."""
+    if not _METRICS_FILE.exists():
+        return
+    with _METRICS_FILE.open("r", newline="", encoding="utf-8") as source:
+        reader = csv.DictReader(source)
+        existing_fields = reader.fieldnames or []
+        if existing_fields == _METRICS_FIELDS:
+            return
+        rows = list(reader)
+    aliases = {
+        "transcript_to_reply_ms": "transcript_to_llm_done_ms",
+        "llm_first_token_ms": "llm_ttft_ms",
+        "kokoro_first_pcm_ms": "kokoro_first_byte_ms",
+        "release_to_first_audio_chunk_ms": "first_speech_after_release_ms",
+        "turn_total_ms": "end_to_end_ms",
+    }
+    temporary = _METRICS_FILE.with_name(f"{_METRICS_FILE.name}.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=_METRICS_FIELDS, lineterminator="\n")
+        writer.writeheader()
+        for old_row in rows:
+            row = {field: old_row.get(field) for field in _METRICS_FIELDS}
+            for field, old_field in aliases.items():
+                if not row.get(field):
+                    row[field] = old_row.get(old_field)
+            if not row.get("release_to_transcript_ms"):
+                row["release_to_transcript_ms"] = old_row.get("stt_total_ms")
+            if not row.get("transcript_to_reply_ms"):
+                row["transcript_to_reply_ms"] = old_row.get("transcript_to_llm_done_ms") or old_row.get("llm_total_ms")
+            writer.writerow(row)
+    temporary.replace(_METRICS_FILE)
 
 
 def _append_metrics_csv(metrics: dict) -> None:
     """Append one quantitative session summary to the backend metrics CSV."""
-    row = {field: metrics.get(field) for field in _METRICS_FIELDS}
     with _METRICS_LOCK:
+        _ensure_metrics_csv_schema()
         file_exists = _METRICS_FILE.exists()
+        fields = _METRICS_FIELDS
+        if file_exists:
+            with _METRICS_FILE.open("r", newline="", encoding="utf-8") as source:
+                fields = csv.DictReader(source).fieldnames or _METRICS_FIELDS
+        row = {field: metrics.get(field) for field in fields}
+        aliases = {
+            "transcript_to_reply_ms": "transcript_to_llm_done_ms",
+            "llm_first_token_ms": "llm_ttft_ms",
+            "kokoro_first_pcm_ms": "kokoro_first_byte_ms",
+            "release_to_first_audio_chunk_ms": "first_speech_after_release_ms",
+            "turn_total_ms": "end_to_end_ms",
+        }
+        for field, old_field in aliases.items():
+            if field in row and row[field] is None:
+                row[field] = metrics.get(old_field)
+        if "release_to_transcript_ms" in row and row["release_to_transcript_ms"] is None:
+            row["release_to_transcript_ms"] = metrics.get("stt_total_ms")
+        if "response_segments_json" in row:
+            row["response_segments_json"] = json.dumps(metrics.get("response_segments", []), ensure_ascii=False)
         with _METRICS_FILE.open("a", newline="", encoding="utf-8") as output:
-            writer = csv.DictWriter(output, fieldnames=_METRICS_FIELDS)
+            writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
@@ -64,7 +119,7 @@ def _model_details():
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "tts_provider": settings.tts_provider,
-        "tts_model": "kokoro" if settings.tts_provider == "kokoro" else "supertonic-3",
+        "tts_model": settings.tts_model if settings.tts_provider == "kokoro" else "supertonic-3",
     }
 
 
@@ -372,15 +427,14 @@ _ABBREVIATIONS = {
 
 
 def _split_ready_segments(buffer: str, force: bool = False) -> tuple[list[str], str]:
-    """Split at natural sentence boundaries (. ? !), with word-count bounding for unpunctuated text."""
+    """Accumulate a minimum, prefer sentences, and enforce a complete-word cap."""
     segments = []
-    max_words = max(1, int(settings.max_speech_segment_words))
-    max_sentence_words = max(max_words * 2, 24)
-    pattern = (
-        r"(?<!\d)[.?!]+(?:\s+|\n)" if not force else r"(?<!\d)[.?!]+(?:\s+|\n|$)"
-    )
+    min_words = settings.min_speech_segment_words
+    max_words = settings.max_speech_segment_words
+    pattern = r"[.?!]+(?:\s+|$)" if force else r"[.?!]+\s+"
     while buffer:
         boundary = -1
+        words = list(re.finditer(r"\S+", buffer))
         for match in re.finditer(pattern, buffer):
             prefix = buffer[: match.end()].strip()
             tokens = prefix.split()
@@ -388,26 +442,23 @@ def _split_ready_segments(buffer: str, force: bool = False) -> tuple[list[str], 
             if last_word in _ABBREVIATIONS:
                 continue
             words_in_match = len(tokens)
-            if words_in_match <= max_sentence_words:
+            if words_in_match > max_words:
+                break
+            if words_in_match >= min_words:
                 boundary = match.end()
                 break
-            else:
-                comma_match = None
-                for cm in re.finditer(r"[,;:]\s+", buffer[: match.end()]):
-                    if len(buffer[: cm.end()].split()) <= max_words:
-                        comma_match = cm
-                boundary = comma_match.end() if comma_match else match.end()
-                break
-
-        if boundary < 0 and not force:
-            words = list(re.finditer(r"\S+", buffer))
-            if len(words) >= max_sentence_words:
+        if boundary < 0:
+            complete_words = words
+            # An LLM delta can end inside a word. Wait for its following space.
+            if not force and buffer and not buffer[-1].isspace():
+                complete_words = words[:-1]
+            if len(complete_words) >= max_words:
                 for match in re.finditer(r"[,;:]\s+", buffer):
-                    if len(buffer[: match.end()].split()) >= max_words:
+                    count = len(buffer[:match.end()].split())
+                    if min_words <= count <= max_words:
                         boundary = match.end()
-                        break
                 if boundary < 0:
-                    boundary = words[max_words - 1].end()
+                    boundary = complete_words[max_words - 1].end()
 
         if boundary < 0:
             break
@@ -449,10 +500,14 @@ async def _finish_live_transcript(websocket, stream):
         await asyncio.gather(finalizing, cancelled, return_exceptions=True)
 
 
-async def _synthesize_chunks(provider, text, voice, speed):
+async def _synthesize_chunks(provider, text, voice, speed, metrics=None):
     stream = getattr(provider, "stream_synthesize", None)
     if stream is None:
         yield await provider.synthesize_segment(text, voice, speed)
+    elif getattr(provider, "supports_timing_metrics", False):
+        async with aclosing(stream(text, voice, speed, timing_metrics=metrics)) as chunks:
+            async for chunk in chunks:
+                yield chunk
     else:
         async with aclosing(stream(text, voice, speed)) as chunks:
             async for chunk in chunks:
@@ -515,8 +570,9 @@ async def handle_websocket(websocket: Any):
             tts_started = perf_counter()
             first_audio = None
             audio_chunks = 0
+            tts_metrics = {}
             async with aclosing(_synthesize_chunks(
-                websocket.app.state.providers.tts, provided_text, voice, speed
+                websocket.app.state.providers.tts, provided_text, voice, speed, tts_metrics
             )) as chunks:
                 async for result in chunks:
                     if first_audio is None:
@@ -538,11 +594,14 @@ async def handle_websocket(websocket: Any):
                 "tts_audio_chunks": audio_chunks,
                 "tts_segment_ms": [tts_ms],
                 "tts_segments": 1,
+                "response_segments": [provided_text],
                 "end_to_end_ms": round((perf_counter() - started) * 1000, 2),
                 "audio_bytes": 0,
                 "status": "ok",
+                **tts_metrics,
                 **_model_details(),
             }
+            metrics["kokoro_total_ms"] = tts_metrics.get("kokoro_total_ms")
             _append_metrics_csv(metrics)
             logger.info("Speech response segments=%s metrics=%s", 1, metrics)
             await websocket.send_json({"type": "metrics", "metrics": metrics})
@@ -564,7 +623,10 @@ async def handle_websocket(websocket: Any):
                 raise ValueError("PCM sample_rate must be an integer between 8000 and 96000 Hz.")
             open_stream = getattr(websocket.app.state.providers.stt, "open_stream", None)
             if open_stream is not None and not provided_text:
-                stt_stream = await open_stream(sample_rate)
+                async def send_transcript_partial(text):
+                    await websocket.send_json({"type": "transcript_partial", "text": text})
+
+                stt_stream = await open_stream(sample_rate, on_partial=send_transcript_partial)
         if not provided_text:
             while True:
                 message = await websocket.receive()
@@ -644,6 +706,9 @@ async def handle_websocket(websocket: Any):
                    duration_ms=metrics["stt_total_ms"])
             if transcript.get("stream_metrics"):
                 metrics["stt_stream"] = transcript["stream_metrics"]
+                metrics["stt_first_partial_ms"] = transcript["stream_metrics"].get("first_partial_ms")
+                metrics["stt_finalization_ms"] = transcript["stream_metrics"].get("finalization_ms")
+                metrics["stt_audio_duration_ms"] = transcript["stream_metrics"].get("audio_duration_ms")
             text = str(transcript.get("text", "")).strip()
         else:
             await websocket.send_json(
@@ -654,6 +719,8 @@ async def handle_websocket(websocket: Any):
         await websocket.send_json(
             {"type": "transcript", "text": text, "language": "en"}
         )
+        transcript_ready_at = perf_counter()
+        metrics["release_to_transcript_ms"] = round((transcript_ready_at - released_at) * 1000, 2)
         logger.info("User transcript: %s", text)
         # Name changes are validated model tools, rather than a competing
         # asynchronous transcript renamer with different speaker evidence.
@@ -682,29 +749,40 @@ async def handle_websocket(websocket: Any):
             if world_state["speaker"] is None and utterance_state["speaker"] is not None:
                 world_state["speaker"] = utterance_state["speaker"]
         metrics["world_context_ms"] = round((perf_counter() - world_started) * 1000, 2)
+        metrics["transcript_ready_at"] = transcript_ready_at
         llm_started = perf_counter()
         llm_statistics = {}
         llm_ttft = None
         tts_first_byte = None
         tts_first_call_ms = None
         tts_task_errors = []
+        first_segment_queued = None
+        first_synthesis_started = None
         speech_queue: asyncio.Queue = asyncio.Queue()
 
         async def synthesize_segment(segment_index, segment_text, raw_text, cues, output):
+            nonlocal first_synthesis_started
             tts_started = perf_counter()
+            if first_synthesis_started is None:
+                first_synthesis_started = tts_started
             record("tts", "synthesis_start", segment_index=segment_index,
                    text=segment_text, provider=settings.tts_provider)
             try:
                 aligner = StreamingCueAligner(raw_text, cues)
                 chunk_index = 0
                 gestures = []
-                quality = "estimated" if settings.tts_provider == "supertonic" else "provider"
+                quality = "estimated"
                 async with aclosing(_synthesize_chunks(
-                    websocket.app.state.providers.tts, segment_text, voice, speed
+                    websocket.app.state.providers.tts, segment_text, voice, speed, metrics
                 )) as chunks:
                     async for result in chunks:
+                        alignment_started = perf_counter()
                         payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
                         payload["gestures"] = aligner.feed(payload)
+                        metrics["gesture_audio_alignment_ms"] = (
+                            metrics.get("gesture_audio_alignment_ms", 0.0)
+                            + (perf_counter() - alignment_started) * 1000
+                        )
                         payload["gesture_timing_quality"] = quality
                         gestures.extend(payload["gestures"])
                         await output.put((segment_index, chunk_index, segment_text, payload, tts_started, None))
@@ -791,20 +869,31 @@ async def handle_websocket(websocket: Any):
         tts_worker = asyncio.create_task(synthesize_queue())
         reply_parts, text_buffer = [], ""
         segment_index = 0
+        metrics["response_segments"] = []
         inline = InlineGestures()
+        gesture_tags_seen = []
+        gesture_tag_keys = set()
         buffer_origin = 0
 
         async def queue_ready(force=False):
-            nonlocal text_buffer, buffer_origin, segment_index
+            nonlocal text_buffer, buffer_origin, segment_index, first_segment_queued
             original = text_buffer
             ready, remaining = _split_ready_segments(original, force=force)
             cursor = 0
             for segment in ready:
                 start = original.index(segment, cursor)
                 cursor = start + len(segment)
+                cue_assignment_started = perf_counter()
                 cues = take_segment_cues(inline, buffer_origin + start, segment)
+                metrics["gesture_cue_assignment_ms"] = (
+                    metrics.get("gesture_cue_assignment_ms", 0.0)
+                    + (perf_counter() - cue_assignment_started) * 1000
+                )
                 speech_text = normalize_for_tts(segment)
                 if speech_text:
+                    metrics["response_segments"].append(speech_text)
+                    if first_segment_queued is None:
+                        first_segment_queued = perf_counter()
                     await speech_queue.put((segment_index, speech_text, segment, cues))
                     segment_index += 1
             buffer_origin += len(original) - len(remaining)
@@ -817,15 +906,39 @@ async def handle_websocket(websocket: Any):
                 now = perf_counter()
                 if llm_ttft is None:
                     llm_ttft = round((now - llm_started) * 1000, 2)
+                gesture_parse_started = perf_counter()
                 clean = inline.feed(delta)
+                for cue in inline.cues:
+                    key = (cue.offset, cue.action)
+                    if key not in gesture_tag_keys:
+                        gesture_tag_keys.add(key)
+                        gesture_tags_seen.append(cue.action)
+                metrics["llm_gesture_parse_ms"] = (
+                    metrics.get("llm_gesture_parse_ms", 0.0)
+                    + (perf_counter() - gesture_parse_started) * 1000
+                )
                 reply_parts.append(clean)
                 text_buffer += clean
                 if clean:
                     await websocket.send_json({"type": "llm_delta", "text": clean})
                 await queue_ready()
-            llm_finished = perf_counter()
+            gesture_parse_started = perf_counter()
             inline.finish()
+            metrics["llm_gesture_parse_ms"] = (
+                metrics.get("llm_gesture_parse_ms", 0.0)
+                + (perf_counter() - gesture_parse_started) * 1000
+            )
             await queue_ready(force=True)
+            llm_finished = perf_counter()
+            llm_done_ms = round((llm_finished - llm_started) * 1000, 2)
+            transcript_to_llm_done_ms = round((llm_finished - transcript_ready_at) * 1000, 2)
+            await websocket.send_json({
+                "type": "llm_complete", "llm_total_ms": llm_done_ms,
+                "transcript_to_llm_done_ms": transcript_to_llm_done_ms,
+                "gesture_parse_ms": round(metrics.get("llm_gesture_parse_ms", 0.0), 3),
+                "gesture_tags": gesture_tags_seen,
+                "gesture_rejected_tags": inline.rejected,
+            })
             record("conversation", "inline_gestures", rejected=inline.rejected,
                    unanchored=len(inline.cues))
         except BaseException:
@@ -838,7 +951,23 @@ async def handle_websocket(websocket: Any):
 
         metrics["llm_ttft_ms"] = llm_ttft
         metrics["llm_total_ms"] = round((llm_finished - llm_started) * 1000, 2)
+        metrics["transcript_to_llm_done_ms"] = round((llm_finished - transcript_ready_at) * 1000, 2)
+        metrics["gesture_rejected_tags"] = inline.rejected
+        metrics["llm_gesture_parse_ms"] = round(metrics.get("llm_gesture_parse_ms", 0.0), 3)
+        metrics["gesture_cue_assignment_ms"] = round(metrics.get("gesture_cue_assignment_ms", 0.0), 3)
+        metrics["gesture_audio_alignment_ms"] = round(metrics.get("gesture_audio_alignment_ms", 0.0), 3)
+        metrics["kokoro_total_ms"] = round(metrics.get("kokoro_total_ms", 0.0), 3) if settings.tts_provider == "kokoro" else None
         metrics["tts_ttfb_ms"] = tts_first_call_ms
+        first_text_at = llm_started + llm_ttft / 1000 if llm_ttft is not None else None
+        metrics["tts_text_buffer_ms"] = (
+            round((first_segment_queued - first_text_at) * 1000, 2)
+            if first_segment_queued is not None and first_text_at is not None else None)
+        metrics["tts_queue_wait_ms"] = (
+            round((first_synthesis_started - first_segment_queued) * 1000, 2)
+            if first_synthesis_started is not None and first_segment_queued is not None else None)
+        metrics["llm_text_to_first_speech_ms"] = (
+            round((tts_first_byte - first_text_at) * 1000, 2)
+            if tts_first_byte is not None and first_text_at is not None else None)
         metrics["first_speech_end_to_end_ms"] = (
             round((tts_first_byte - started) * 1000, 2) if tts_first_byte else None
         )
@@ -857,6 +986,10 @@ async def handle_websocket(websocket: Any):
         metrics["post_release_ms"] = round((perf_counter() - released_at) * 1000, 2)
         metrics["first_speech_after_release_ms"] = (
             round((tts_first_byte - released_at) * 1000, 2) if tts_first_byte else None)
+        first_pcm_at = metrics.pop("kokoro_first_byte_at", None)
+        metrics["kokoro_first_pcm_after_release_ms"] = (
+            round((first_pcm_at - released_at) * 1000, 2)
+            if first_pcm_at is not None else None)
         metrics["llm_output_bytes"] = len(reply.encode("utf-8"))
         record("conversation", "turn_metrics", metrics=metrics)
         _append_metrics_csv(metrics)

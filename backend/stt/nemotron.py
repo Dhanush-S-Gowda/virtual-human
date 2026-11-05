@@ -13,7 +13,7 @@ from config import settings
 
 
 class NemotronStream:
-    def __init__(self, socket, timeout, language, sample_rate=16000):
+    def __init__(self, socket, timeout, language, sample_rate=16000, on_partial=None):
         self.socket = socket
         self.timeout = timeout
         self.language = language
@@ -24,6 +24,8 @@ class NemotronStream:
         self.audio_bytes = 0
         self.first_partial_ms = None
         self.commit_started = None
+        self.partial_text = ""
+        self.on_partial = on_partial
         self.receiver = asyncio.create_task(self._receive())
 
     async def _receive(self):
@@ -32,8 +34,15 @@ class NemotronStream:
             kind = event.get("type", "")
             if kind == "error":
                 raise ValueError(f"Nemotron: {event.get('message', event.get('error', 'server error'))}")
-            if kind == "conversation.item.input_audio_transcription.delta" and self.first_partial_ms is None:
-                self.first_partial_ms = round((perf_counter() - self.started) * 1000, 2)
+            if kind == "conversation.item.input_audio_transcription.delta":
+                if self.first_partial_ms is None:
+                    self.first_partial_ms = round((perf_counter() - self.started) * 1000, 2)
+                if isinstance(event.get("transcript"), str):
+                    self.partial_text = event["transcript"]
+                elif isinstance(event.get("delta"), str):
+                    self.partial_text += event["delta"]
+                if self.on_partial is not None:
+                    await self.on_partial(self.partial_text)
             if kind == "conversation.item.input_audio_transcription.completed":
                 text = str(event.get("transcript", event.get("text", ""))).strip()
                 if text:
@@ -47,7 +56,7 @@ class NemotronStream:
                         "stream_metrics": {"first_partial_ms": self.first_partial_ms,
                                            "audio_duration_ms": self.audio_bytes / (2 * self.sample_rate) * 1000,
                                            "finalization_ms": round((perf_counter() - self.commit_started) * 1000, 2)}}
-            # Ignore partials. Only committed, completed transcripts reach the LLM.
+            # Partial text is display-only; only committed text reaches the LLM.
 
     async def send_audio(self, chunk):
         if self.receiver.done():
@@ -77,7 +86,7 @@ class NemotronProvider:
     async def initialize(self):
         """The external server owns model loading; connections are per recording."""
 
-    async def open_stream(self, sample_rate):
+    async def open_stream(self, sample_rate, on_partial=None):
         if not 8000 <= sample_rate <= 96000:
             raise ValueError("Nemotron sample rate must be between 8000 and 96000 Hz.")
         headers = ({"Authorization": f"Bearer {settings.nemotron_api_key}"}
@@ -104,7 +113,8 @@ class NemotronProvider:
                 event = json.loads(await socket.recv())
                 if event.get("type") != "session.updated":
                     raise ValueError(f"Nemotron rejected session settings: {event.get('message', event)}")
-            return NemotronStream(socket, settings.nemotron_timeout, settings.nemotron_language, sample_rate)
+            return NemotronStream(socket, settings.nemotron_timeout, settings.nemotron_language,
+                                  sample_rate, on_partial)
         except BaseException:
             await socket.close()
             raise

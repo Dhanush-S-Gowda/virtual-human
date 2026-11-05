@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import csv
 import io
 import json
 import wave
@@ -17,26 +18,21 @@ from backend.tests.test_backend import FakeLLM, FakeWebSocket
 from config import settings
 from inline_gestures import Cue, StreamingCueAligner
 from schemas import SynthesizeResponse
-from tts.kokoro import KokoroProvider
+from tts.kokoro import KokoroProvider, estimate_word_timings
 import pipeline
 
 
-class Lines(httpx.AsyncByteStream):
+class ByteChunks(httpx.AsyncByteStream):
     def __init__(self, items):
         self.items = items
         self.closed = False
 
     async def __aiter__(self):
         for item in self.items:
-            yield (json.dumps(item) + "\n").encode()
+            yield item
 
     async def aclose(self):
         self.closed = True
-
-
-def packet(word="Hello", start=0.0, audio=b"\x01\x00" * 2400):
-    return {"audio": base64.b64encode(audio).decode(), "audio_format": "audio/pcm",
-            "timestamps": [{"word": word, "start_time": start, "end_time": start + 0.1}]}
 
 
 def chunk(word):
@@ -45,37 +41,42 @@ def chunk(word):
 
 
 @pytest.mark.asyncio
-async def test_pcm_chunks_become_independent_wavs_with_local_word_times():
-    stream = Lines([packet(), packet("there", 0.125)])
+async def test_openai_pcm_chunks_become_playable_wavs_with_estimated_local_word_times():
+    stream = ByteChunks([b"\x01\x00" * 6000, b"\x01\x00" * 6000, b"\x01\x00" * 6000])
+    metrics = {}
 
     def respond(request):
         payload = json.loads(request.content)
-        assert payload["stream"] is True
+        assert request.url.path == "/v1/audio/speech"
         assert payload["response_format"] == "pcm"
+        assert "stream" not in payload
         return httpx.Response(200, stream=stream)
 
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     try:
-        results = [item async for item in provider.stream_synthesize("Hello there", "af_heart", 1)]
-        assert len(results) == 2
-        assert results[1].wtimes == pytest.approx([25])
+        results = [item async for item in provider.stream_synthesize("Hello there.", "af_heart", 1, metrics)]
+        assert len(results) == 3
+        assert results[0].words == ["Hello"]
+        assert results[1].words == []
+        assert results[2].words == ["there"]
+        assert results[2].wtimes == pytest.approx([20.0])
         for result in results:
             with wave.open(io.BytesIO(base64.b64decode(result.audio_base64))) as wav:
                 assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (24000, 1, 2)
-                assert wav.getnframes() == 2400
+                assert wav.getnframes() == 6000
         assert stream.closed
+        assert metrics["kokoro_first_byte_ms"] >= 0
+        assert metrics["kokoro_total_ms"] >= metrics["kokoro_first_byte_ms"]
+        assert metrics["kokoro_word_timing_ms"] >= 0
     finally:
         await provider.close()
 
 
-@pytest.mark.parametrize("items", [[], [{"error": "failed"}], [{"audio": "???"}],
-                                      [packet(audio=b"x")], [packet() | {"timestamps": None}],
-                                      [packet() | {"audio_format": "audio/wav"}],
-                                      [packet(start=float("inf"))]])
+@pytest.mark.parametrize("items", [[], [b"x"]])
 @pytest.mark.asyncio
 async def test_invalid_or_empty_streams_fail_clearly_and_close(items):
-    stream = Lines(items)
+    stream = ByteChunks(items)
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, stream=stream)))
@@ -157,6 +158,8 @@ async def test_first_chunk_reaches_client_before_provider_finishes(mode, monkeyp
 
 @pytest.mark.asyncio
 async def test_concurrent_segments_stream_in_order_and_keep_later_gestures(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "min_speech_segment_words", 1)
+    monkeypatch.setattr(settings, "tts_max_concurrent_segments", 2)
     class LLM(FakeLLM):
         async def stream_chat(self, messages):
             yield "[greeting]First part. [clapping]Second part. "
@@ -242,14 +245,83 @@ async def test_turn_cancellation_closes_stream_and_stops_workers(mode, monkeypat
 
 @pytest.mark.asyncio
 async def test_closing_stream_early_closes_http_response():
-    stream = Lines([packet(), packet("there", 0.1)])
+    stream = ByteChunks([b"\x01\x00" * 6000, b"\x01\x00" * 6000])
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, stream=stream)))
     chunks = provider.stream_synthesize("Hello there", "af_heart", 1)
     try:
-        await anext(chunks)
+        first = await anext(chunks)
+        assert first.words == ["Hello"]
         await chunks.aclose()
         assert stream.closed
     finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_estimated_word_intervals_are_monotonic_and_fit_predicted_duration():
+    words, starts, durations, total = estimate_word_timings("That's a great result.", 1.0)
+    assert words == ["That's", "a", "great", "result"]
+    assert starts == sorted(starts)
+    assert all(duration > 0 for duration in durations)
+    assert starts[-1] + durations[-1] == pytest.approx(total)
+
+
+def test_metrics_csv_schema_expands_without_losing_existing_rows(monkeypatch, tmp_path):
+    metrics_file = tmp_path / "metrics.csv"
+    metrics_file.write_text("stt_provider,status\r\nnemotron,ok\r\n", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "_METRICS_FILE", metrics_file)
+    pipeline._append_metrics_csv({"status": "ok", "tts_segment_ms": [120.0],
+                                  "kokoro_request_first_byte_ms": [1.5]})
+    with metrics_file.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    assert len(rows) == 2
+    assert rows[0]["stt_provider"] == "nemotron"
+    assert rows[0]["llm_gesture_parse_ms"] == ""
+    assert rows[1]["status"] == "ok"
+    assert rows[1]["tts_segment_ms_json"] == "[120.0]"
+    assert rows[1]["kokoro_request_first_byte_ms_json"] == "[1.5]"
+    assert "gesture_audio_alignment_ms" in rows[1]
+
+
+@pytest.mark.asyncio
+async def test_request_limit_is_shared_between_simultaneous_turns(monkeypatch):
+    monkeypatch.setattr(settings, "tts_max_concurrent_segments", 1)
+    first_entered, release = asyncio.Event(), asyncio.Event()
+    active, maximum = 0, 0
+
+    class BlockingBytes(ByteChunks):
+        async def __aiter__(self):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            first_entered.set()
+            try:
+                await release.wait()
+                async for data in super().__aiter__():
+                    yield data
+            finally:
+                active -= 1
+
+    provider = KokoroProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=BlockingBytes([b"\x01\x00" * 6000]))))
+
+    async def collect():
+        return [item async for item in provider.stream_synthesize("Hello", "af_heart", 1)]
+
+    first = asyncio.create_task(collect())
+    await asyncio.wait_for(first_entered.wait(), 1)
+    second = asyncio.create_task(collect())
+    try:
+        await asyncio.sleep(0)
+        assert maximum == 1
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(first, second), 1)
+        assert all(len(result) == 1 for result in results)
+        assert maximum == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
         await provider.close()

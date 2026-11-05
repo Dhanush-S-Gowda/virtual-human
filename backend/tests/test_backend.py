@@ -129,8 +129,9 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(settings.faster_whisper_model, "base")
         self.assertEqual(settings.faster_whisper_device, "cpu")
         self.assertEqual(settings.faster_whisper_compute_type, "int8")
+        self.assertEqual(settings.min_speech_segment_words, 8)
         self.assertEqual(settings.max_speech_segment_words, 8)
-        self.assertEqual(settings.tts_max_concurrent_segments, 2)
+        self.assertEqual(settings.tts_max_concurrent_segments, 1)
         self.assertEqual(settings.tts_supertonic_steps, 2)
         self.assertTrue(settings.system_prompt.strip())
 
@@ -141,14 +142,14 @@ class BackendTests(unittest.TestCase):
         )
         self.assertEqual(
             segments,
-            ["This is a short clause.", "This is another.", "Finally this ends."],
+            ["This is a short clause. This is another.", "Finally this ends."],
         )
         self.assertEqual(remainder, "")
 
     def test_decimal_period_does_not_end_a_speech_segment(self):
-        text = "I am Qwen3.5, a large language model. My name is Li Yangzhong."
+        text = "I am Qwen3.5, a helpful large language model. My name is Li Yangzhong."
         segments, remainder = _split_ready_segments(text)
-        self.assertEqual(segments, ["I am Qwen3.5, a large language model."])
+        self.assertEqual(segments, ["I am Qwen3.5, a helpful large language model."])
         self.assertEqual(remainder, "My name is Li Yangzhong.")
 
     def test_speech_segments_bound_unpunctuated_text_and_flush_final_text(self):
@@ -261,7 +262,9 @@ class BackendTests(unittest.TestCase):
 
         async def stream_chat(messages) -> AsyncIterator[str]:
             llm.calls.append(messages)
-            yield "First sentence. Second sentence. Third sentence."
+            yield ("First sentence contains exactly eight words for testing. "
+                   "Second sentence contains exactly eight words for testing. "
+                   "Third sentence contains exactly eight words for testing.")
 
         llm.stream_chat = stream_chat
         providers = SimpleNamespace(llm=llm, tts=tts, stt=FakeSTT())
@@ -273,7 +276,8 @@ class BackendTests(unittest.TestCase):
             {"type": "start", "session_id": "parallel", "text": "Speak this."},
         )
 
-        asyncio.run(handle_websocket(websocket))
+        with patch.object(settings, "tts_max_concurrent_segments", 2):
+            asyncio.run(handle_websocket(websocket))
 
         speech_events = [event for event in websocket.events if event["type"] == "speech"]
         self.assertGreaterEqual(tts.max_active, 2)

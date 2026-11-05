@@ -61,6 +61,26 @@ test("every streamed chunk updates the same reply and follows the growing conten
   assert.equal(body.scrollTop, body.scrollHeight);
 });
 
+test("live transcript revisions update one draft and final text commits in place", () => {
+  const { body, log } = fixture();
+  log.setUserDraft("I would like");
+  const draft = body.children[0];
+  log.setUserDraft("I would like to ask");
+  assert.equal(body.children.length, 1);
+  assert.equal(draft.children[1].textContent, "I would like to ask");
+  log.commitUserDraft("I would like to ask a question.");
+  assert.equal(body.children.length, 1);
+  assert.equal(body.children[0], draft);
+  assert.equal(draft.children[1].textContent, "I would like to ask a question.");
+});
+
+test("an empty final transcript discards its partial draft", () => {
+  const { body, log } = fixture();
+  log.setUserDraft("unconfirmed words");
+  log.commitUserDraft("");
+  assert.equal(body.children.length, 0);
+});
+
 test("errors preserve history and a subsequent reply does not overwrite the previous reply", () => {
   const { body, log } = fixture();
   log.append("user", "First question");

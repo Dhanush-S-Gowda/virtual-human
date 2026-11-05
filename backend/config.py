@@ -13,7 +13,8 @@ CONFIG_FILE = Path(__file__).with_name("config.yaml")
 with CONFIG_FILE.open(encoding="utf-8") as config_file:
     config = yaml.safe_load(config_file)
 
-config["llm_api_key"] = os.environ.get("llm_api_key")
+config["llm_api_key"] = os.environ.get("LLM_API_KEY", "not-needed")
+config["tts_api_key"] = os.environ.get("TTS_API_KEY", "")
 
 DEFAULTS = {
     "nemotron_url": "ws://127.0.0.1:8080/v1/audio/transcriptions/realtime",
@@ -26,13 +27,23 @@ DEFAULTS = {
     "faster_whisper_device": "cpu",
     "faster_whisper_compute_type": "int8",
     "faster_whisper_download_root": ".cache/faster-whisper",
+    "min_speech_segment_words": 8,
     "max_speech_segment_words": 8,
     "tts_device": "auto",
+    "tts_model": "kokoro",
+    "tts_api_key": "",
     "tts_max_concurrent_segments": 2,
     "tts_language": "en",
     "tts_supertonic_steps": 2,
 }
 config = {**DEFAULTS, **(config or {})}
+
+for name in ("min_speech_segment_words", "max_speech_segment_words", "tts_max_concurrent_segments"):
+    value = config[name]
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{name} must be a positive integer.")
+if config["max_speech_segment_words"] < config["min_speech_segment_words"]:
+    raise ValueError("max_speech_segment_words must be at least min_speech_segment_words.")
 
 config["system_prompt"] = (
     (CONFIG_FILE.parent / config.pop("system_prompt_file", "llm/prompts/system.txt"))

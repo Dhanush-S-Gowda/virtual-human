@@ -10,6 +10,7 @@ import { CLIP_ACTIONS, chooseClip, mountAnimationControls } from "./avatar/clipA
 import { createHeadPitchLimiter } from "./avatar/headPitch.js";
 import { GestureTimeline } from "./avatar/GestureTimeline.js";
 import { TalkingGestures } from "./avatar/TalkingGestures.js";
+import { decodeSpeechAudio } from "./avatar/speechAudio.js";
 import { acceptLandmarkFrame, drawLandmarkOverlay, freshLandmarkFrame, landmarkStatus } from "./cv/landmarkOverlay.js";
 import { GestureEvents } from "./cv/gestureEvents.js";
 import { CameraGestureResponses } from "./cv/cameraGestureResponses.js";
@@ -70,7 +71,6 @@ const talkingGestures = new TalkingGestures(
         || gestureTimeline.hasUpcomingForeground(head?.audioCtx?.currentTime ?? 0)
 );
 let speechGeneration = 0;
-let speechPreparation = new AbortController();
 const listeningNods = new ListeningNods(
     () => avatarReady ? head : null,
     () => avatarActionQueue.busy || Boolean(head?.isSpeaking) || document.hidden
@@ -115,6 +115,30 @@ const stopButton =
 const transcriptBody =
     document.getElementById("transcriptBody");
 const conversationLog = new ConversationLog(transcriptBody);
+const speechLatencyElement = document.getElementById("speechLatency");
+let speechTurnTiming = null;
+
+function setSpeechLatency(key, value) {
+    if (!speechTurnTiming) return;
+    speechTurnTiming.milestones.set(key, value);
+    if (!speechLatencyElement) return;
+    speechLatencyElement.hidden = false;
+    speechLatencyElement.textContent = [...speechTurnTiming.milestones.values()].join(" · ");
+}
+
+function elapsedSpeechMs(from, to = performance.now()) {
+    return from == null ? null : Math.max(0, to - from);
+}
+
+function formatLatency(ms) {
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+function finalizedTimeLabel() {
+    return new Intl.DateTimeFormat("en-US", {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true,
+    }).format(new Date());
+}
 
 const pttBanner =
     document.getElementById("pttBanner");
@@ -211,9 +235,8 @@ const sttManager = new STTManager({
     },
     getContext: () => ({ speaker: speakingEvents.snapshot() }),
     onCaptureStart: () => {
+        conversationLog.clearErrors();
         speechGeneration++;
-        speechPreparation.abort();
-        speechPreparation = new AbortController();
         gestureTimeline.clear();
         void talkingGestures.clear();
         speechActions.clear();
@@ -229,16 +252,39 @@ const sttManager = new STTManager({
         for (const event of speakingEvents.stop()) handleCVEvent(event);
     },
     onStateChange: (state, detail) => {
+        if (state === STTState.LISTENING) {
+            speechTurnTiming = { releaseAt: null, transcriptAt: null, firstAudioAt: null, milestones: new Map() };
+            if (speechLatencyElement) speechLatencyElement.hidden = true;
+        } else if (state === STTState.TRANSCRIBING && speechTurnTiming) {
+            speechTurnTiming.releaseAt = performance.now();
+            setSpeechLatency("release", "Released · waiting for transcript");
+        }
         updatePTTUI(state, detail);
     },
     onTranscript: (result) => {
-        updateTranscriptUI("user", result.text);
+        conversationLog.commitUserDraft(
+            result.text, speakingEvents.snapshot()?.display_name, finalizedTimeLabel(),
+        );
         updatePTTUI("THINKING");
         avatarController.setState(AvatarState.IDLE);
         setStatus("Transcribed — generating reply...");
     },
     onEvent: (event) => {
-        if (event.type === "avatar_action") {
+        if (event.type === "transcript_partial") {
+            conversationLog.setUserDraft(event.text || "");
+        } else if (event.type === "transcript") {
+            if (speechTurnTiming?.releaseAt != null) {
+                speechTurnTiming.transcriptAt = performance.now();
+                setSpeechLatency("transcript", `release → transcript ${formatLatency(elapsedSpeechMs(speechTurnTiming.releaseAt))}`);
+            }
+        } else if (event.type === "llm_complete") {
+            if (speechTurnTiming?.transcriptAt != null) {
+                setSpeechLatency("llm", `transcript → reply + gestures ${formatLatency(elapsedSpeechMs(speechTurnTiming.transcriptAt))}`);
+            }
+            setSpeechLatency("gesture", `tag parse ${Number(event.gesture_parse_ms || 0).toFixed(2)} ms`);
+            conversationLog.appendGestureTags(event.gesture_tags);
+            conversationLog.finishReply(finalizedTimeLabel());
+        } else if (event.type === "avatar_action") {
             const actions = { gesture: clipActions };
             const action = actions[event.tool]?.[event.action];
             if (action) speechActions.add(action);
@@ -246,7 +292,14 @@ const sttManager = new STTManager({
             conversationLog.appendReplyDelta(event.text);
         } else if (event.type === "speech") {
             const generation = speechGeneration;
-            speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event, generation)).catch((error) => {
+            const receivedAt = performance.now();
+            if (speechTurnTiming?.firstAudioAt == null) {
+                if (speechTurnTiming) {
+                    speechTurnTiming.firstAudioAt = receivedAt;
+                    setSpeechLatency("firstAudio", `release → first audio data ${formatLatency(elapsedSpeechMs(speechTurnTiming.releaseAt, receivedAt))}`);
+                }
+            }
+            speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event, generation, receivedAt)).catch((error) => {
                 if (generation !== speechGeneration) return;
                 speechActions.clear();
                 console.error("Speech playback failed:", error);
@@ -255,6 +308,9 @@ const sttManager = new STTManager({
         } else if (event.type === "metrics") {
             updateProviderBadge(event.metrics);
             console.info("Conversation metrics", event.metrics);
+            if (event.metrics?.kokoro_first_byte_ms != null) {
+                setSpeechLatency("kokoro", `Kokoro request → first PCM ${formatLatency(event.metrics.kokoro_first_byte_ms)}`);
+            }
         } else if (event.type === "done") {
             conversationLog.finishReply();
             setStatus("Ready");
@@ -262,6 +318,7 @@ const sttManager = new STTManager({
         }
     },
     onError: (errorMsg) => {
+        conversationLog.discardUserDraft();
         speechActions.clear();
         listeningNods.stop();
         updateTranscriptUI("error", errorMsg);
@@ -303,6 +360,7 @@ const pushToTalk = new KeyboardPushToTalk({
     },
     onCancel: () => {
         sttManager.cancelRecording();
+        conversationLog.discardUserDraft();
         updatePTTUI(STTState.IDLE);
         avatarController.setState(AvatarState.IDLE);
         setStatus("Ready");
@@ -469,92 +527,12 @@ async function executeAction(
  * --------------------------------------------------------------------------
  */
 
-/**
- * Convert base64 audio returned by the backend
- * into an ArrayBuffer.
- */
-function base64ToArrayBuffer(base64) {
-    const binaryString = atob(base64);
-
-    const length = binaryString.length;
-
-    const bytes = new Uint8Array(length);
-
-    for (let i = 0; i < length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    return bytes.buffer;
-}
-
-
-/** Play a speech segment received from the conversation backend. */
-async function playSpeechResult(result, generation) {
+/** Play audio immediately; gesture clips load independently when dispatched. */
+async function playSpeechResult(result, generation, receivedAt = performance.now()) {
     if (generation !== speechGeneration) return;
-    const signal = speechPreparation.signal;
-    let cancelPreparation;
-    const cancelled = new Promise((resolve) => { cancelPreparation = resolve; });
-    signal.addEventListener("abort", cancelPreparation, { once: true });
-    try {
-    const actionsToPrepare = new Set(["talking", ...(result.gestures || []).map(({ action }) => action)]);
-    await Promise.race([cancelled, Promise.all([...actionsToPrepare].map(async (action) => {
-        if (!Object.hasOwn(CLIP_ACTIONS, action)) return;
-        try {
-            await Promise.all(CLIP_ACTIONS[action].urls.map((url) =>
-                head.playAnimation(url, null, 0.01, 0, 0.01, signal, true)));
-        } catch (error) {
-            console.warn("Gesture asset unavailable:", action, error);
-        }
-    }))]);
-    } finally {
-        signal.removeEventListener("abort", cancelPreparation);
-    }
-    if (generation !== speechGeneration) return;
-
-    /*
-     * Validate backend response.
-     */
-    if (!result.audio_base64) {
-        throw new Error(
-            "Kokoro response does not contain audio_base64."
-        );
-    }
-
-    if (
-        !Array.isArray(result.words) ||
-        !Array.isArray(result.wtimes) ||
-        !Array.isArray(result.wdurations)
-    ) {
-        throw new Error(
-            "Kokoro response is missing word timing information."
-        );
-    }
-
-    /*
-     * Convert base64 → WAV ArrayBuffer.
-     */
-    const wavBuffer =
-        base64ToArrayBuffer(
-            result.audio_base64
-        );
-
-    /*
-     * IMPORTANT:
-     *
-     * TalkingHead does NOT want the WAV
-     * ArrayBuffer directly.
-     *
-     * Decode the WAV using the same AudioContext
-     * that TalkingHead uses.
-     */
-    if (head.audioCtx.state === "suspended") {
-        await head.audioCtx.resume();
-    }
-
-    const audioBuffer =
-        await head.audioCtx.decodeAudioData(
-            wavBuffer.slice(0)
-        );
+    const decodeStarted = performance.now();
+    const audioBuffer = await decodeSpeechAudio(head.audioCtx, result);
+    const decodeMs = performance.now() - decodeStarted;
     if (generation !== speechGeneration) return;
 
     /*
@@ -575,9 +553,17 @@ async function playSpeechResult(result, generation) {
             wdurations: result.wdurations,
             onAudioStart: (start, rate, duration) => {
                 if (generation !== speechGeneration) return;
+                const gestureScheduleStarted = performance.now();
                 gestureTimeline.schedule(result.gestures, start, rate);
+                const gestureScheduleMs = performance.now() - gestureScheduleStarted;
                 talkingGestures.until(start + duration / rate);
                 speechActions.startSpeech();
+                console.info("Speech playback latency", {
+                    segment_index: result.index, chunk_index: result.chunk_index,
+                    decode_ms: Number(decodeMs.toFixed(2)),
+                    receive_to_audio_start_ms: Number((performance.now() - receivedAt).toFixed(2)),
+                    gesture_schedule_ms: Number(gestureScheduleMs.toFixed(3)),
+                });
             }
         },
         {
@@ -599,8 +585,6 @@ async function playSpeechResult(result, generation) {
 
 function stopSpeech() {
     speechGeneration++;
-    speechPreparation.abort();
-    speechPreparation = new AbortController();
     gestureTimeline.clear();
     cameraResponses.clear();
     void talkingGestures.clear();
@@ -941,6 +925,7 @@ function stopEverything() {
          * Stop any active speech-to-text recording.
          */
         sttManager.cancelRecording();
+        conversationLog.discardUserDraft();
         updatePTTUI(STTState.IDLE);
         avatarController.setState(AvatarState.IDLE);
 

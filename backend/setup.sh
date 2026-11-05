@@ -29,9 +29,9 @@ mkdir -p "$backend_dir/supertonic/assets"
 # Optional Kokoro TTS Docker image
 if command -v docker >/dev/null 2>&1; then
     echo -e "\n[*] Pulling Kokoro TTS Docker image (CPU)..."
-    docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest || echo "Warning: Docker pull failed, skipping Kokoro pull."
+    docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2 || echo "Warning: Docker pull failed, skipping Kokoro pull."
 else
-    echo -e "\n[*] Docker not found. If using Kokoro TTS, pull: docker pull ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+    echo -e "\n[*] Docker not found. If using Kokoro TTS, pull: docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2"
 fi
 
 # ── 2. Computer Vision Models ─────────────────────────────────

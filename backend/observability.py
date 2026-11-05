@@ -45,7 +45,7 @@ def redact(value):
     if isinstance(value, (list, tuple)):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        for key in ("OPENOBSERVE_PASSWORD", "OPENOBSERVE_TOKEN", "llm_api_key"):
+        for key in ("OPENOBSERVE_PASSWORD", "OPENOBSERVE_TOKEN", "LLM_API_KEY", "TTS_API_KEY"):
             secret = os.getenv(key)
             if secret:
                 value = value.replace(secret, "[redacted]")

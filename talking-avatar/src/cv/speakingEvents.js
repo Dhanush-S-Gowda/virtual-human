@@ -57,8 +57,11 @@ export class SpeakingEvents {
 
   snapshot() {
     const person = this.speaker || this.lastSpeaker;
+    const displayName = person?.display_name;
     return person ? { track_id: person.track_id, generation: person.generation,
-      source_id: person.source_id, method: person.method } : null;
+      source_id: person.source_id, method: person.method,
+      display_name: displayName && !["unknown", "unknown speaker", "unknown person"].includes(displayName.trim().toLowerCase())
+        ? displayName : null } : null;
   }
 
   event(phase) {

@@ -84,7 +84,7 @@ async def test_streaming_sanitizes_display_history_and_speech_without_losing_ord
     client = FakeWebSocket(app, {"type": "start", "session_id": "test", "text": "Hi"})
     await asyncio.wait_for(pipeline.handle_websocket(client), 2)
     speech = [event for event in client.events if event["type"] == "speech"]
-    expected = ["Hello.", "Welcome back!"] if reply.startswith("Hello") else []
+    expected = ["Hello. Welcome back!"] if reply.startswith("Hello") else []
     assert tts.calls == expected
     assert [event["index"] for event in speech] == list(range(len(expected)))
     expected_display = "Hello. **Welcome** back!" if reply.startswith("Hello") else "!."

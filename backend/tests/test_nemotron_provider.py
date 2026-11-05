@@ -91,6 +91,9 @@ async def test_live_socket_audio_precedes_release_and_llm_gets_only_full_transcr
         assert packets == [b"\x01\x00" * 1600]
         transcript = next(event for event in client.events if event["type"] == "transcript")
         assert transcript["text"] == "Hello my name is Alex."
+        partial = next(event for event in client.events if event["type"] == "transcript_partial")
+        assert partial["text"] == "unstable words"
+        assert client.events.index(partial) < client.events.index(transcript)
         assert llm.calls[0][-1]["content"] == "Hello my name is Alex."
 
 

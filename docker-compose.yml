@@ -2,6 +2,12 @@ services:
   kokoro:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
     container_name: kokoro
+    environment:
+      OMP_NUM_THREADS: "${KOKORO_CPU_THREADS:-3}"
+      MKL_NUM_THREADS: "${KOKORO_CPU_THREADS:-3}"
+      OPENBLAS_NUM_THREADS: "${KOKORO_CPU_THREADS:-3}"
+      WEB_CONCURRENCY: "1"
+      API_LOG_LEVEL: INFO
     ports:
       - "8880:8880"
     healthcheck:
@@ -72,6 +78,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: virtual-human-backend
+    env_file:
+      - ./backend/.env
     ports:
       - "8000:8000"
     volumes:

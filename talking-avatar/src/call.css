@@ -48,6 +48,8 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--color-foc
 .panelEyebrow { display: block; margin-bottom: 3px; color: var(--color-ink-2); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 #activityEmpty { color: #9aa0a6; }
 #activityPanel:has(#perceptionOverlay:not([hidden])) #activityEmpty { display: none; }
+#activityPanel:has(#speechLatency:not([hidden])) #activityEmpty { display: none; }
+#speechLatency { color: var(--color-ink-2); overflow-wrap: anywhere; }
 #perceptionOverlay { position: static; color: var(--color-ink); overflow-wrap: anywhere; }
 #transcriptContainer { flex: 1; display: flex; flex-direction: column; min-height: 120px; overflow: hidden; border-radius: var(--radius-md); background: var(--color-paper-2); }
 #transcriptHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 18px 18px 14px; }
@@ -63,6 +65,7 @@ button:focus-visible, summary:focus-visible { outline: 2px solid var(--color-foc
 .transcript-user { color: var(--color-accent); }
 .transcript-avatar { color: var(--color-success); }
 .transcript-text, .transcript-reply { white-space: pre-wrap; }
+.transcript-gestures { margin-top: 5px; color: var(--color-ink-2); font-size: 11px; }
 .transcript-thinking { padding-top: 16px; color: var(--color-ink-2); font-size: var(--text-sm); }
 .transcript-error { padding-top: 16px; color: var(--color-danger); }
 #controls { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: 16px; min-width: 0; padding: 2px 4px 16px; }

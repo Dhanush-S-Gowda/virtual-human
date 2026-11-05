@@ -75,7 +75,7 @@ def create_app(providers=None):
                 settings.stt_provider,
                 settings.nemotron_model if settings.stt_provider == "nemotron" else settings.faster_whisper_model,
                 settings.tts_provider,
-                "kokoro" if settings.tts_provider == "kokoro" else "supertonic-3",
+                settings.tts_model if settings.tts_provider == "kokoro" else "supertonic-3",
             )
             yield
         finally:
@@ -104,6 +104,7 @@ def create_app(providers=None):
                               "stt_model": settings.nemotron_model if settings.stt_provider == "nemotron"
                               else settings.faster_whisper_model,
                               "llm": settings.llm_model, "tts": settings.tts_provider,
+                              "tts_model": settings.tts_model if settings.tts_provider == "kokoro" else "supertonic-3",
                               "tts_voices": list(VOICES[settings.tts_provider]),
                               "tts_default_voice": DEFAULT_VOICES[settings.tts_provider]}}
 
