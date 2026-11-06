@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import os
+from math import isfinite
 import yaml
 from dotenv import load_dotenv
 
@@ -14,6 +15,7 @@ with CONFIG_FILE.open(encoding="utf-8") as config_file:
     config = yaml.safe_load(config_file)
 
 config["llm_api_key"] = os.environ.get("LLM_API_KEY", "not-needed")
+config["tts_url"] = os.environ.get("TTS_URL", config.get("tts_url", "http://localhost:8880"))
 config["tts_api_key"] = os.environ.get("TTS_API_KEY", "")
 
 DEFAULTS = {
@@ -35,8 +37,29 @@ DEFAULTS = {
     "tts_max_concurrent_segments": 2,
     "tts_language": "en",
     "tts_supertonic_steps": 2,
+    "tts_volume_gain": 1.5,
+    "gesture_min_duration_seconds": 2.0,
+    "cv_world_history_seconds": 10.0,
+    "cv_world_history_windows": 0,
 }
 config = {**DEFAULTS, **(config or {})}
+
+history_seconds = config["cv_world_history_seconds"]
+history_windows = config["cv_world_history_windows"]
+if type(history_seconds) not in (int, float) or not isfinite(history_seconds) or history_seconds < 0:
+    raise ValueError("cv_world_history_seconds must be finite and nonnegative.")
+if type(history_windows) is not int or history_windows < 0:
+    raise ValueError("cv_world_history_windows must be a nonnegative integer.")
+if history_windows > config["cv_retained_windows"]:
+    raise ValueError("Increase cv_retained_windows to cover cv_world_history_windows.")
+if not history_windows and history_seconds > (config["cv_retained_windows"] - 1) * config["cv_window_seconds"]:
+    raise ValueError("Increase cv_retained_windows to cover cv_world_history_seconds plus the open window.")
+
+for name in ("tts_volume_gain", "gesture_min_duration_seconds"):
+    value = config[name]
+    if (type(value) not in (int, float) or not isfinite(value)
+            or value < 0 or (name == "gesture_min_duration_seconds" and value == 0)):
+        raise ValueError(f"{name} must be a finite {'positive' if name == 'gesture_min_duration_seconds' else 'nonnegative'} number.")
 
 for name in ("min_speech_segment_words", "max_speech_segment_words", "tts_max_concurrent_segments"):
     value = config[name]

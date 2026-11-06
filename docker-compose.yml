@@ -89,6 +89,7 @@ services:
       - ./backend/metrics-data:/app/data
     environment:
       METRICS_CSV_PATH: /app/data/metrics.csv
+      TTS_URL: http://kokoro:8880
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

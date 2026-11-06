@@ -172,6 +172,53 @@ class WindowManager:
     def summaries(self) -> tuple[WindowSummary, ...]:
         return tuple(window.summary() for window in self._windows.values() if window.closed)
 
+    def visual_history_cutoff(self, seconds, windows=0):
+        if windows:
+            return max(0., (floor(self._watermark / self.window_seconds) - windows + 1) * self.window_seconds)
+        return max(0., self._watermark - seconds)
+
+    def visual_history(self, seconds, windows=0):
+        """Compact capture-time observations, including open and revised windows."""
+        cutoff = self.visual_history_cutoff(seconds, windows)
+        result = {"mode": "windows" if windows else "seconds", "requested_seconds": seconds,
+                  "window_limit": windows, "window_seconds": self.window_seconds,
+                  "windows": []}
+        if not windows and not seconds:
+            return result
+        for window in sorted(self._windows.values(), key=lambda item: item.window_id):
+            if window.end <= cutoff or window.start > self._watermark:
+                continue
+            frames = {key: frame for key, frame in window.frames.items()
+                      if cutoff <= frame.timestamp <= self._watermark}
+            if not frames:
+                continue
+            summary = replace(window, frames=frames).summary()
+            gestures, faces = {}, {}
+            for frame in sorted(frames.values(), key=lambda item: item.timestamp):
+                faces.update({face.track_id: face for face in frame.faces})
+                for point in frame.keypoints:
+                    for action in point.gestures:
+                        gestures[(point.track_id, action)] = frame.timestamp
+            counts = dict(summary.object_counts)
+            result["windows"].append({
+                "window_id": window.window_id, "revision": window.revision, "closed": window.closed,
+                "start_seconds_ago": round(self._watermark - max(window.start, cutoff), 3),
+                "end_seconds_ago": round(max(0., self._watermark - window.end), 3),
+                "pending_tasks": window.pending_tasks,
+                "objects_observed": any("objects" in frame.completed for frame in frames.values()),
+                "counts": {"unique_people": counts.get("person", 0),
+                           "unique_objects": sum(count for label, count in counts.items() if label != "person"),
+                           "recognized_faces": sum(bool(face.person_id) for face in faces.values())},
+                "object_counts": {label: count for label, count in counts.items() if label != "person"},
+                "people": [{"track_id": person.track_id, "name": person.display_name or "Unknown"}
+                           for person in summary.people],
+                "gestures": [{"track_id": track_id,
+                              "name": (faces[track_id].display_name or "Unknown") if track_id in faces else "Unknown",
+                              "action": action, "last_seen_seconds_ago": round(self._watermark - timestamp, 3)}
+                             for (track_id, action), timestamp in sorted(gestures.items(), key=lambda item: item[1], reverse=True)],
+            })
+        return result
+
     def advance(self, timestamp: float):
         if not isfinite(timestamp) or timestamp < self._watermark:
             raise ValueError("Capture-clock watermark must be finite and nondecreasing")
@@ -786,10 +833,14 @@ class CVService(VirtualHumanAdapter):
 
     def get_current_scene(self):
         import time
+        history = self.manager.visual_history(
+            getattr(self.settings, "cv_world_history_seconds", 10.),
+            getattr(self.settings, "cv_world_history_windows", 0))
         record = self._latest_objects
         if record is None or self.manager._watermark - record.timestamp > 1.:
             return {"people": [], "objects": [], "active_speaker": None, "windows": self._summaries(),
-                    "frame_available": False, "source_id": self._source_id}
+                    "frame_available": False, "source_id": self._source_id,
+                    "recent_visual_history": history}
         scene = self.frame_metadata(record)
         self._prune_gestures()
         for person in scene["people"]:
@@ -806,7 +857,9 @@ class CVService(VirtualHumanAdapter):
                 person["mouth_openness"] = mouth.mouth_openness if mouth else None
                 person["mouth_motion"] = mouth.mouth_motion if mouth else None
         scene.update(active_speaker=None, windows=self._summaries(), updated_at=time.time(),
-                     frame_available=True, source_id=self._source_id, gesture_window_seconds=3)
+                     frame_available=True, source_id=self._source_id,
+                     recent_visual_history=history,
+                     gesture_window_seconds=self.manager._watermark - self._gesture_cutoff())
         return scene
 
     def _remember_gestures(self, record):
@@ -819,9 +872,14 @@ class CVService(VirtualHumanAdapter):
         self._prune_gestures()
 
     def _prune_gestures(self):
-        cutoff = self.manager._watermark - 3.
+        cutoff = self._gesture_cutoff()
         self._recent_gestures = {key: timestamp for key, timestamp in self._recent_gestures.items()
                                  if timestamp >= cutoff}
+
+    def _gesture_cutoff(self):
+        return self.manager.visual_history_cutoff(
+            getattr(self.settings, "cv_world_history_seconds", 10.),
+            getattr(self.settings, "cv_world_history_windows", 0))
 
     def _summaries(self):
         from dataclasses import asdict

@@ -96,7 +96,7 @@ def test_setup_shell_syncs_cv_and_invokes_helper_from_repository_root(tmp_path):
     calls = commands.read_text()
     assert "sync" in calls
     assert "--extra cv" not in calls
-    assert f"{root}|run --project {root / 'backend'} python -m backend.scripts.setup_cv_models" in calls
+    assert f"{root}|run --project {root / 'backend'} --no-sync --offline --no-python-downloads python -m backend.scripts.setup_models" in calls
     assert "yolov8n-pose" not in calls
 
 

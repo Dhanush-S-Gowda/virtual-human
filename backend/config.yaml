@@ -49,18 +49,22 @@ nemotron_timeout: 120
 # tts_device: cpu  # auto selects CUDA, then OpenVINO GPU, then CPU; cpu forces CPU
 
 # Kokoro (HTTP service)
-# tts_provider: kokoro
-# tts_model: kokoro
-# tts_url: http://localhost:8880
-# tts_sample_rate: 24000
+tts_provider: kokoro
+tts_model: kokoro
+tts_url: http://localhost:8880
+tts_sample_rate: 24000
 
 # Hosted OpenAI-compatible example (set TTS_API_KEY in backend/.env):
-tts_provider: kokoro
-tts_model: hexgrad/kokoro-82m
-tts_url: https://openrouter.ai/api/v1
+# tts_provider: kokoro
+# tts_model: hexgrad/kokoro-82m
+# tts_url: https://openrouter.ai/api/v1
 
 # Shared speech rate
 tts_speed: 1.0
+# Browser speech amplitude multiplier (1.0 = original volume).
+tts_volume_gain: 1.5
+# Each tagged gesture gets at least this long; longer clips finish naturally.
+gesture_min_duration_seconds: 2.0
 # Wait for this many spoken words, then prefer a complete sentence.
 min_speech_segment_words: 15
 # Split at a complete word when no sentence boundary is available by this limit.
@@ -95,6 +99,10 @@ cv_window_seconds: 1.0
 cv_object_fps: 20.0
 cv_keypoint_fps: 30.0
 cv_retained_windows: 30
+# Visual history sent with every LLM turn, measured by capture time.
+cv_world_history_seconds: 10.0
+# Set above zero to use this many latest windows instead of the seconds setting.
+cv_world_history_windows: 0
 cv_keypoint_history_seconds: 3.0
 cv_keypoint_history_samples: 3000
 cv_max_face_tasks: 4
@@ -152,7 +160,7 @@ cv:
     consent_required: true
   speaker:
     name_patterns:
-    - (?:my name is|i am|i'm|call me|they call me)\s+(\w+)
+    - (?:my name is|call me|they call me)\s+(\w+)
     single_person_confidence: 0.7
     mouth_motion_weight: 0.6
     ambiguity_threshold: 0.3

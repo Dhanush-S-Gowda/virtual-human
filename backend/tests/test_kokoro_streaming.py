@@ -18,7 +18,7 @@ from backend.tests.test_backend import FakeLLM, FakeWebSocket
 from config import settings
 from inline_gestures import Cue, StreamingCueAligner
 from schemas import SynthesizeResponse
-from tts.kokoro import KokoroProvider, estimate_word_timings
+from tts.kokoro import KokoroProvider
 import pipeline
 
 
@@ -40,51 +40,53 @@ def chunk(word):
                               words=[word], wtimes=[0], wdurations=[100])
 
 
-@pytest.mark.asyncio
-async def test_openai_pcm_chunks_become_playable_wavs_with_estimated_local_word_times():
-    stream = ByteChunks([b"\x01\x00" * 6000, b"\x01\x00" * 6000, b"\x01\x00" * 6000])
-    metrics = {}
+def captioned_payload():
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(b"\x00\x00" * 24000)
+    return {"audio": base64.b64encode(audio.getvalue()).decode(), "timestamps": [
+        {"word": "Hello", "start_time": .1, "end_time": .4},
+        {"word": "there", "start_time": .5, "end_time": .9}]}
 
+
+@pytest.mark.asyncio
+async def test_captioned_speech_preserves_provider_word_intervals():
+    metrics = {}
     def respond(request):
         payload = json.loads(request.content)
-        assert request.url.path == "/v1/audio/speech"
-        assert payload["response_format"] == "pcm"
-        assert "stream" not in payload
-        return httpx.Response(200, stream=stream)
-
+        assert request.url.path == "/dev/captioned_speech"
+        assert payload["response_format"] == "wav"
+        assert payload["return_timestamps"] and not payload["stream"]
+        return httpx.Response(200, json=captioned_payload())
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     try:
         results = [item async for item in provider.stream_synthesize("Hello there.", "af_heart", 1, metrics)]
-        assert len(results) == 3
-        assert results[0].words == ["Hello"]
-        assert results[1].words == []
-        assert results[2].words == ["there"]
-        assert results[2].wtimes == pytest.approx([20.0])
-        for result in results:
-            with wave.open(io.BytesIO(base64.b64decode(result.audio_base64))) as wav:
-                assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (24000, 1, 2)
-                assert wav.getnframes() == 6000
-        assert stream.closed
-        assert metrics["kokoro_first_byte_ms"] >= 0
-        assert metrics["kokoro_total_ms"] >= metrics["kokoro_first_byte_ms"]
-        assert metrics["kokoro_word_timing_ms"] >= 0
+        assert len(results) == 1
+        assert results[0].words == ["Hello", "there"]
+        assert results[0].wtimes == [100, 500]
+        assert results[0].wdurations == pytest.approx([300, 400])
+        assert results[0].timing_quality == "provider"
+        assert metrics["kokoro_total_ms"] >= 0
     finally:
         await provider.close()
 
 
-@pytest.mark.parametrize("items", [[], [b"x"]])
+@pytest.mark.parametrize("bad", [None, [], [{"word": "Hello", "start_time": -1, "end_time": -.5}],
+                                    [{"word": "Hello", "start_time": 0, "end_time": 9}]])
 @pytest.mark.asyncio
-async def test_invalid_or_empty_streams_fail_clearly_and_close(items):
-    stream = ByteChunks(items)
+async def test_missing_or_invalid_provider_timestamps_fail_without_estimates(bad):
     provider = KokoroProvider()
+    data = {**captioned_payload(), "timestamps": bad}
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, stream=stream)))
+        lambda request: httpx.Response(200, json=data)))
     try:
         with pytest.raises(HTTPException) as error:
             _ = [item async for item in provider.stream_synthesize("Hello", "af_heart", 1)]
         assert error.value.status_code == 502
-        assert stream.closed
     finally:
         await provider.close()
 
@@ -245,27 +247,18 @@ async def test_turn_cancellation_closes_stream_and_stops_workers(mode, monkeypat
 
 @pytest.mark.asyncio
 async def test_closing_stream_early_closes_http_response():
-    stream = ByteChunks([b"\x01\x00" * 6000, b"\x01\x00" * 6000])
+    stream = ByteChunks([json.dumps(captioned_payload()).encode()])
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, stream=stream)))
     chunks = provider.stream_synthesize("Hello there", "af_heart", 1)
     try:
         first = await anext(chunks)
-        assert first.words == ["Hello"]
+        assert first.words == ["Hello", "there"]
         await chunks.aclose()
         assert stream.closed
     finally:
         await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_estimated_word_intervals_are_monotonic_and_fit_predicted_duration():
-    words, starts, durations, total = estimate_word_timings("That's a great result.", 1.0)
-    assert words == ["That's", "a", "great", "result"]
-    assert starts == sorted(starts)
-    assert all(duration > 0 for duration in durations)
-    assert starts[-1] + durations[-1] == pytest.approx(total)
 
 
 def test_metrics_csv_schema_expands_without_losing_existing_rows(monkeypatch, tmp_path):
@@ -306,7 +299,7 @@ async def test_request_limit_is_shared_between_simultaneous_turns(monkeypatch):
 
     provider = KokoroProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, stream=BlockingBytes([b"\x01\x00" * 6000]))))
+        lambda request: httpx.Response(200, stream=BlockingBytes([json.dumps(captioned_payload()).encode()]))))
 
     async def collect():
         return [item async for item in provider.stream_synthesize("Hello", "af_heart", 1)]
@@ -325,3 +318,40 @@ async def test_request_limit_is_shared_between_simultaneous_turns(monkeypatch):
         release.set()
         await asyncio.gather(first, second, return_exceptions=True)
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_trimmed_first_word_is_clipped_without_shifting_provider_timeline():
+    data = captioned_payload()
+    # Captured from the real response to "Of course, Danush. ...".
+    data["timestamps"] = [
+        {"word": "Of", "start_time": -0.004583333333333328, "end_time": 0.17041666666666666},
+        {"word": "course", "start_time": 0.17041666666666666, "end_time": 0.49541666666666667}]
+    provider = KokoroProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=data)))
+    try:
+        result = await provider.synthesize_segment("Of course", "af_heart", 1)
+        assert result.wtimes == pytest.approx([0, 170.41666666666666])
+        assert result.wdurations == pytest.approx([170.41666666666666, 325])
+        assert result.timing_quality == "provider"
+        cues = StreamingCueAligner("Of course", [Cue(0, "greeting")]).feed(result.model_dump())
+        assert cues == [{"action": "greeting", "at_ms": 0, "word_index": 0,
+                         "duration_ms": pytest.approx(170.41666666666666)}]
+    finally:
+        await provider.close()
+
+
+@pytest.mark.parametrize("timestamps", [
+    [{"word": "bad", "start_time": .5, "end_time": .4}],
+    [{"word": "bad", "start_time": float("nan"), "end_time": 1}],
+    [{"word": "bad", "start_time": 0, "end_time": float("inf")}],
+    [{"word": "first", "start_time": 0, "end_time": .2},
+     {"word": "bad", "start_time": -.01, "end_time": .3}],
+    [{"word": "first", "start_time": .2, "end_time": .3},
+     {"word": "bad", "start_time": .1, "end_time": .4}],
+])
+def test_invalid_intervals_remain_rejected(timestamps):
+    from tts.kokoro import validate_timestamps
+    with pytest.raises(ValueError, match="invalid interval"):
+        validate_timestamps(timestamps)

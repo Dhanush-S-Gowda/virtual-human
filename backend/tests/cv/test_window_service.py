@@ -107,7 +107,8 @@ def test_scene_retains_all_gestures_in_three_second_window():
     from backend.cv.keypoint_det.base import KeypointDetection
     from backend.cv.object_det.base import ObjectDetection
 
-    service = CVService(Objects(), Faces(), Points(), settings)
+    config = SimpleNamespace(**{**vars(settings), "cv_world_history_seconds": 3., "cv_world_history_windows": 0})
+    service = CVService(Objects(), Faces(), Points(), config)
     service.manager._track_generations[1] = 10
     record = FrameRecord(
         frame_id=1, timestamp=1., width=640, height=480,

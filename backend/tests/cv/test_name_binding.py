@@ -29,8 +29,6 @@ def test_parse_name_intent_positive():
     cases = [
         ("My name is Bablu", "Bablu"),
         ("Hello, my name is Alice!", "Alice"),
-        ("I am Bob", "Bob"),
-        ("I'm Charlie", "Charlie"),
         ("Please call me David", "David"),
         ("They call me Eve", "Eve"),
     ]
@@ -78,6 +76,12 @@ def test_spoken_name_and_face_survive_database_reopen(tmp_path, introduce_before
 
 def test_parse_name_intent_negative():
     cases = [
+        "I'm good",
+        "I’m good",
+        "I am good",
+        "I'm tired",
+        "I am Bob",
+        "I'm Charlie",
         "What is the weather today?",
         "Can you help me with this?",
         "Hello there!",
@@ -251,3 +255,13 @@ def test_speaker_association_verified_mouth_motion(identity_env):
     assert events[0].display_name == "Vikram"
     assert store.get_person(pid)["display_name"] == "Vikram"
 
+
+
+@pytest.mark.parametrize("text", ["I'm good", "I’m good", "I am good", "I'm tired"])
+def test_state_descriptions_do_not_change_a_remembered_name(identity_env, text):
+    store, _, scene, service = identity_env
+    person_id = store.create_person(display_name="Tom")
+    scene.update_track(1, stable=True, person_id=person_id, display_name="Tom")
+    assert SpeakerAssociation(scene, service).handle_transcript(text) == []
+    assert scene.get_track(1).display_name == "Tom"
+    assert store.get_person(person_id)["display_name"] == "Tom"

@@ -70,6 +70,8 @@ async def test_websocket_delivers_clean_text_audio_and_separate_word_timed_gestu
                 "audio_base64": "dGVzdA==", "words": ["Hello", "there."],
                 "wtimes": [0, 300], "wdurations": [300, 200]})
 
+    monkeypatch.setattr(pipeline.settings, "gesture_min_duration_seconds", 1.25)
+    monkeypatch.setattr(pipeline.settings, "tts_volume_gain", 1.8)
     monkeypatch.setattr(pipeline, "current_world", AsyncMock(return_value=({"speaker": None}, {})))
     app = SimpleNamespace(state=SimpleNamespace(providers=SimpleNamespace(
         llm=TaggedLLM(), stt=FakeSTT(), tts=TimedTTS()), conversations=OrderedDict()))
@@ -80,4 +82,30 @@ async def test_websocket_delivers_clean_text_audio_and_separate_word_timed_gestu
     deltas = [event["text"] for event in socket.events if event["type"] == "llm_delta"]
     assert "".join(deltas) == "Hello there."
     speech = next(event for event in socket.events if event["type"] == "speech")
-    assert speech["gestures"] == [{"action": "greeting", "at_ms": 0., "word_index": 0}]
+    assert speech["playback"] == {"gesture_min_duration_seconds": 1.25, "tts_volume_gain": 1.8}
+    assert speech["gestures"] == [{"action": "greeting", "at_ms": 0., "word_index": 0, "duration_ms": 300.}]
+
+
+def test_gesture_duration_uses_provider_word_interval_after_punctuation():
+    from inline_gestures import StreamingCueAligner
+    parser = InlineGestures()
+    text = parser.feed("Hello. [clapping]Clap [laughing]laugh.")
+    payload = {"words": ["Hello", ".", "Clap", "laugh", "."],
+               "wtimes": [0, 200, 300, 1100, 1600],
+               "wdurations": [200, 100, 800, 500, 100]}
+    expected = [{"action": "clapping", "at_ms": 300., "word_index": 1, "duration_ms": 800.},
+                {"action": "laughing", "at_ms": 1100., "word_index": 2, "duration_ms": 500.}]
+    assert StreamingCueAligner(text, parser.cues).feed(payload) == expected
+    assert align_cues(text, parser.cues, payload) == expected
+
+
+@pytest.mark.asyncio
+async def test_health_exposes_configurable_playback_settings(monkeypatch):
+    import httpx
+    from main import create_app
+    monkeypatch.setattr(pipeline.settings, "gesture_min_duration_seconds", .75)
+    monkeypatch.setattr(pipeline.settings, "tts_volume_gain", 2.0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app()), base_url="http://test") as client:
+        response = await client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["playback"] == {"gesture_min_duration_seconds": .75, "tts_volume_gain": 2.0}

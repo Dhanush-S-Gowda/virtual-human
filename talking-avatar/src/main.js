@@ -8,6 +8,8 @@ import { SpeechActions } from "./avatar/SpeechActions.js";
 import { playClipAction } from "./avatar/clipAction.js";
 import { CLIP_ACTIONS, chooseClip, mountAnimationControls } from "./avatar/clipActions.js";
 import { createHeadPitchLimiter } from "./avatar/headPitch.js";
+import { GestureSpeechPacer } from "./avatar/GestureSpeechPacer.js";
+import { AudioGesturePlayer } from "./avatar/AudioGesturePlayer.js";
 import { GestureTimeline } from "./avatar/GestureTimeline.js";
 import { TalkingGestures } from "./avatar/TalkingGestures.js";
 import { decodeSpeechAudio } from "./avatar/speechAudio.js";
@@ -57,17 +59,36 @@ const clipActions = Object.fromEntries(Object.keys(CLIP_ACTIONS).map((action) =>
     action, () => playCatalogAction(action),
 ]));
 const speechActions = new SpeechActions(() => Boolean(head?.isSpeaking));
-const gestureTimeline = new GestureTimeline((action) => {
-    if (action === "talking") return; // Speech already owns automatic low-priority talking motion.
-    if (Object.hasOwn(CLIP_ACTIONS, action)) playCatalogAction(action, "tagged");
+const audioGestures = new AudioGesturePlayer(() => head);
+const gestureSpeechPacer = new GestureSpeechPacer();
+let playbackOptions = { gesture_min_duration_seconds: 2, tts_volume_gain: 1.5 };
+
+function applyPlaybackSettings(settings) {
+    if (Number.isFinite(settings?.gesture_min_duration_seconds) && settings.gesture_min_duration_seconds > 0) {
+        playbackOptions.gesture_min_duration_seconds = settings.gesture_min_duration_seconds;
+    }
+    if (Number.isFinite(settings?.tts_volume_gain) && settings.tts_volume_gain >= 0) {
+        playbackOptions.tts_volume_gain = settings.tts_volume_gain;
+    }
+    audioGestures.minimumSeconds = playbackOptions.gesture_min_duration_seconds;
+    gestureSpeechPacer.minimumSeconds = playbackOptions.gesture_min_duration_seconds;
+    head?.setMixerGain(playbackOptions.tts_volume_gain);
+}
+const gestureTimeline = new GestureTimeline((action, cue) => {
+    if (Object.hasOwn(CLIP_ACTIONS, action)) {
+        avatarActionQueue.clear();
+        void talkingGestures.clear();
+        listeningNods.stopNod();
+        audioGestures.play(action, cue);
+    }
 }, () => avatarActionQueue.busy || document.hidden);
 const cameraResponses = new CameraGestureResponses(
     (action) => playCatalogAction(action, "camera"),
-    () => !avatarReady || avatarActionQueue.busy || document.hidden
+    () => !avatarReady || avatarActionQueue.busy || audioGestures.busy || document.hidden
 );
 const talkingGestures = new TalkingGestures(
     (url, signal) => playClipAction(head, url, signal, { armsOnly: true }),
-    () => avatarActionQueue.busy || document.hidden
+    () => avatarActionQueue.busy || audioGestures.busy || document.hidden
         || gestureTimeline.hasUpcomingForeground(head?.audioCtx?.currentTime ?? 0)
 );
 let speechGeneration = 0;
@@ -238,6 +259,8 @@ const sttManager = new STTManager({
         conversationLog.clearErrors();
         speechGeneration++;
         gestureTimeline.clear();
+        gestureSpeechPacer.clear();
+        audioGestures.clear();
         void talkingGestures.clear();
         speechActions.clear();
         listeningNods.start();
@@ -527,13 +550,18 @@ async function executeAction(
  * --------------------------------------------------------------------------
  */
 
-/** Play audio immediately; gesture clips load independently when dispatched. */
+/** Preload tagged clips, then schedule audio and word-aligned gesture cues together. */
 async function playSpeechResult(result, generation, receivedAt = performance.now()) {
+    if (generation !== speechGeneration) return;
+    await audioGestures.prepare(result.gestures);
     if (generation !== speechGeneration) return;
     const decodeStarted = performance.now();
     const audioBuffer = await decodeSpeechAudio(head.audioCtx, result);
     const decodeMs = performance.now() - decodeStarted;
     if (generation !== speechGeneration) return;
+    applyPlaybackSettings(result.playback);
+    const paced = gestureSpeechPacer.pace(head.audioCtx, audioBuffer, result,
+        (action) => audioGestures.durationFor(action), 1 / head.animSlowdownRate);
 
     /*
      * Send AudioBuffer + word timings to TalkingHead.
@@ -544,17 +572,17 @@ async function playSpeechResult(result, generation, receivedAt = performance.now
      */
     head.speakAudio(
         {
-            audio: audioBuffer,
+            audio: paced.audio,
 
-            words: result.words,
+            words: paced.words,
 
-            wtimes: result.wtimes,
+            wtimes: paced.wtimes,
 
-            wdurations: result.wdurations,
+            wdurations: paced.wdurations,
             onAudioStart: (start, rate, duration) => {
                 if (generation !== speechGeneration) return;
                 const gestureScheduleStarted = performance.now();
-                gestureTimeline.schedule(result.gestures, start, rate);
+                gestureTimeline.schedule(paced.gestures, start, rate);
                 const gestureScheduleMs = performance.now() - gestureScheduleStarted;
                 talkingGestures.until(start + duration / rate);
                 speechActions.startSpeech();
@@ -586,6 +614,8 @@ async function playSpeechResult(result, generation, receivedAt = performance.now
 function stopSpeech() {
     speechGeneration++;
     gestureTimeline.clear();
+    gestureSpeechPacer.clear();
+    audioGestures.clear();
     cameraResponses.clear();
     void talkingGestures.clear();
     speechActions.clear();
@@ -688,17 +718,18 @@ async function initializeAvatar() {
                     lipsyncModules:
                         ["en"],
 
-                    // Keep generated speech at unity gain.
+                    // Gain is also refreshed from the backend with each speech packet.
                     mixerGainSpeech:
-                        1,
+                        playbackOptions.tts_volume_gain,
                     // Runs after FBX playback and TalkingHead's additive pose layers.
                     update: () => {
-                        limitHeadPitch(head);
                         if (head?.audioCtx) {
                             gestureTimeline.advance(head.audioCtx.currentTime);
+                            audioGestures.update(head.audioCtx.currentTime);
                             cameraResponses.update();
                             talkingGestures.update(head.audioCtx.currentTime);
                         }
+                        limitHeadPitch(head);
                     },
 
                     /*
@@ -892,6 +923,7 @@ function playCatalogAction(action, kind = "manual") {
 }
 
 function queueAvatarAction(name, action, kind = "manual") {
+    audioGestures.clear();
     avatarActionQueue.enqueue((signal) => executeAction(name, async (avatar) => {
         await talkingGestures.interrupt();
         if (signal.aborted) return;
@@ -1665,7 +1697,9 @@ async function loadRuntimeInfo() {
     try {
         const response = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(2000) });
         if (!response.ok) throw new Error("Backend health check failed");
-        updateProviderBadge((await response.json()).providers);
+        const info = await response.json();
+        updateProviderBadge(info.providers);
+        applyPlaybackSettings(info.playback);
     } catch {
         const badge = document.getElementById("sttBadge");
         if (badge) badge.textContent = "STT: unavailable";

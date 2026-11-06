@@ -10,3 +10,4 @@ class SynthesizeResponse(BaseModel):
     wtimes: list[float]
     wdurations: list[float]
     sample_rate: int = 24000
+    timing_quality: str = "estimated"

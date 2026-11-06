@@ -794,7 +794,7 @@ async def handle_websocket(websocket: Any):
                             metrics.get("gesture_audio_alignment_ms", 0.0)
                             + (perf_counter() - alignment_started) * 1000
                         )
-                        payload["gesture_timing_quality"] = quality
+                        payload["gesture_timing_quality"] = payload.get("timing_quality", quality)
                         gestures.extend(payload["gestures"])
                         await output.put((segment_index, chunk_index, segment_text, payload, tts_started, None))
                         chunk_index += 1
@@ -824,7 +824,9 @@ async def handle_websocket(websocket: Any):
                 tts_first_call_ms = round((tts_first_byte - tts_started) * 1000, 2)
             await websocket.send_json(
                 {"type": "speech", "index": segment_index,
-                 "chunk_index": chunk_index, "text": segment_text, **payload}
+                 "chunk_index": chunk_index, "text": segment_text, **payload,
+                 "playback": {"tts_volume_gain": settings.tts_volume_gain,
+                              "gesture_min_duration_seconds": settings.gesture_min_duration_seconds}}
             )
             metrics["tts_audio_chunks"] = metrics.get("tts_audio_chunks", 0) + 1
 

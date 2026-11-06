@@ -77,12 +77,12 @@ def align_cues(text, cues, payload):
     spoken = normalize_for_tts(text)
     spoken_words = list(_WORDS.finditer(spoken))
     timings = []
-    for word, time in zip(payload.get("words", []), payload.get("wtimes", [])):
+    for position, (word, time) in enumerate(zip(payload.get("words", []), payload.get("wtimes", []))):
         if not isinstance(time, (int, float)) or not isfinite(time) or time < 0:
             continue
-        timings.extend((token.group().casefold(), float(time)) for token in _WORDS.finditer(word))
+        timings.extend((token.group().casefold(), float(time), position) for token in _WORDS.finditer(word))
     expected = [word.group().casefold() for word in spoken_words]
-    actual = [word for word, _ in timings]
+    actual = [item[0] for item in timings]
     # Misaligned word lists must never silently dispatch a gesture at the wrong word.
     if expected != actual:
         return []
@@ -91,7 +91,8 @@ def align_cues(text, cues, payload):
         prefix = normalize_for_tts(text[:cue.offset])
         index = len(_WORDS.findall(prefix))
         if index < len(timings):
-            output.append({"action": cue.action, "at_ms": timings[index][1], "word_index": index})
+            output.append({"action": cue.action, "at_ms": timings[index][1], "word_index": index,
+                           **_cue_duration(payload, timings[index][2])})
     return output
 
 
@@ -107,6 +108,15 @@ def take_segment_cues(parser, start, text):
     return selected
 
 
+def _cue_duration(payload, index):
+    durations = payload.get("wdurations", [])
+    if index < len(durations):
+        duration = durations[index]
+        if isinstance(duration, (int, float)) and isfinite(duration) and duration > 0:
+            return {"duration_ms": float(duration)}
+    return {}
+
+
 class StreamingCueAligner:
     """Align a segment's cues across successive chunks without replaying them."""
 
@@ -119,17 +129,18 @@ class StreamingCueAligner:
 
     def feed(self, payload):
         timings = []
-        for word, time in zip(payload.get("words", []), payload.get("wtimes", [])):
+        for position, (word, time) in enumerate(zip(payload.get("words", []), payload.get("wtimes", []))):
             if not isinstance(time, (int, float)) or not isfinite(time) or time < 0:
                 self.valid = False
                 return []
-            timings.extend((token.casefold(), float(time)) for token in _WORDS.findall(word))
+            timings.extend((token.casefold(), float(time), position) for token in _WORDS.findall(word))
         end = self.offset + len(timings)
-        if not self.valid or self.expected[self.offset:end] != [word for word, _ in timings]:
+        if not self.valid or self.expected[self.offset:end] != [item[0] for item in timings]:
             self.valid = False
             return []
         output = [{"action": action, "at_ms": timings[index - self.offset][1],
-                   "word_index": index - self.offset}
+                   "word_index": index - self.offset,
+                   **_cue_duration(payload, timings[index - self.offset][2])}
                   for index, action in self.cues if self.offset <= index < end]
         self.offset = end
         return output

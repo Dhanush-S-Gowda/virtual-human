@@ -4,41 +4,28 @@ set -euo pipefail
 backend_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_root="$(cd -- "$backend_dir/.." && pwd)"
 
-echo "============================================================"
-echo " Setting up Virtual Human & Computer Vision Models"
-echo "============================================================"
+confirm_download() {
+    local answer
+    read -r -p "$1 Enter Y to continue [y/N]: " answer || return 1
+    [[ "$answer" == "Y" || "$answer" == "y" ]]
+}
 
-# ── 1. Virtual Human Backend STT & TTS ────────────────────────
-echo -e "\n[1/4] Syncing backend virtual environment..."
-cd "$backend_dir"
-uv sync
-
-echo -e "\n[2/4] Downloading and validating configured Faster-Whisper model..."
-uv run python -c 'from stt.faster_whisper import _load_model; _load_model(local_files_only=False)'
-
-echo -e "\n[3/4] Downloading Supertonic 3 TTS ONNX assets..."
-mkdir -p "$backend_dir/supertonic/assets"
-(
-    cd "$backend_dir/supertonic"
-    uv run --project "$backend_dir" hf download \
-        supertone-oss-archive/supertonic-3 \
-        --revision aafc6e32416a594460b32413efc49d7fe4ce6d46 \
-        --local-dir assets
-)
-
-# Optional Kokoro TTS Docker image
-if command -v docker >/dev/null 2>&1; then
-    echo -e "\n[*] Pulling Kokoro TTS Docker image (CPU)..."
-    docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2 || echo "Warning: Docker pull failed, skipping Kokoro pull."
-else
-    echo -e "\n[*] Docker not found. If using Kokoro TTS, pull: docker pull ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2"
+if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required. Install uv and rerun this script. Nothing was downloaded."
+    exit 1
 fi
 
-# ── 2. Computer Vision Models ─────────────────────────────────
-echo -e "\n[4/4] Preparing configured CV models (existing valid assets are reused)..."
-cd "$project_root"
-uv run --project "$backend_dir" python -m backend.scripts.setup_cv_models
+cd "$backend_dir"
+if uv sync --check --offline --no-python-downloads >/dev/null 2>&1; then
+    echo "Backend dependencies are already installed and synchronized."
+elif confirm_download "Backend dependencies are missing or out of date. Install/sync Python and packages?"; then
+    uv sync
+else
+    echo "Dependency installation skipped. Model setup requires a synchronized backend environment."
+    exit 0
+fi
 
-echo -e "\n============================================================"
-echo " Model setup completed successfully."
-echo "============================================================"
+cd "$project_root"
+# uv itself must not sync packages or download Python before the helper prompts.
+uv run --project "$backend_dir" --no-sync --offline --no-python-downloads \
+    python -m backend.scripts.setup_models

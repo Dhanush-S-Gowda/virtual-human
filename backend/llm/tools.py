@@ -28,7 +28,7 @@ def tool(name, description, properties, required):
 TOOLS = [
     tool(
         "rename_person",
-        "Remember a person's name when they introduce themselves (for example, 'my name is Ganush' or 'I'm Ganush') or ask you to remember it. Use the current speaker's visible track_id from world state for a self introduction. If multiple people are visible and the speaker is not identified, ask who to remember instead of guessing.",
+        "Remember names only from explicit naming phrases such as 'my name is Ganush', 'call me Ganush', or a request to remember or change a name. Do not treat 'I'm ...' or 'I am ...' alone as naming intent; 'I'm good' describes a state. Use the current speaker's visible track_id; ask if the target is unclear.",
         {"track_id": {"type": "integer"}, "name": {"type": "string"}},
         ["track_id", "name"],
     ),

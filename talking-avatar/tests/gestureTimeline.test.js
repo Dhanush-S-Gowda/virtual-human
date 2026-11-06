@@ -41,3 +41,24 @@ test("a leading foreground tag reserves time before background talking can begin
   timeline.advance(10.03);
   assert.equal(timeline.hasUpcomingForeground(10.03), false);
 });
+
+test("word durations scale with playback rate and expired gestures never queue", () => {
+  const calls = [];
+  const timeline = new GestureTimeline((action, cue) => calls.push({ action, ...cue }), () => false);
+  timeline.schedule([{ action: "clapping", at_ms: 400, duration_ms: 800 },
+    { action: "laughing", at_ms: 1200, duration_ms: 600 }], 10, 2);
+  timeline.advance(10.3);
+  assert.equal(calls[0].duration, .4);
+  assert.equal(calls[0].time, 10.2);
+  timeline.advance(11);
+  assert.equal(calls.length, 1);
+  assert.equal(timeline.skipped, 1);
+});
+
+test("an explicit timed talking tag can interrupt a busy foreground gesture", () => {
+  const calls = [];
+  const timeline = new GestureTimeline(action => calls.push(action), () => true);
+  timeline.schedule([{ action: "talking", at_ms: 0, duration_ms: 600 }], 5);
+  timeline.advance(5);
+  assert.deepEqual(calls, ["talking"]);
+});

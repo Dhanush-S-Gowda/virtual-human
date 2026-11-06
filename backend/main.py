@@ -100,6 +100,8 @@ def create_app(providers=None):
     @application.get("/health")
     async def health():
         return {"status": "ok", "transport": "websocket", "endpoint": "/ws",
+                "playback": {"tts_volume_gain": settings.tts_volume_gain,
+                             "gesture_min_duration_seconds": settings.gesture_min_duration_seconds},
                 "providers": {"stt": settings.stt_provider,
                               "stt_model": settings.nemotron_model if settings.stt_provider == "nemotron"
                               else settings.faster_whisper_model,

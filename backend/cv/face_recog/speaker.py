@@ -41,8 +41,7 @@ class NameIntentResult:
 def parse_name_intent(text: str) -> NameIntentResult:
     """Extract a self-introduction intent from transcript text.
 
-    Checks against configured regex patterns (e.g. "my name is Bablu",
-    "I am Bablu", "call me Bablu").
+    Checks explicit naming phrases (e.g. "my name is Bablu", "call me Bablu").
     """
     text_lower = text.lower().strip()
     patterns = settings.speaker.name_patterns

@@ -19,7 +19,7 @@ flowchart LR
     API -->|local model worker| FW[Faster-Whisper]
     API -->|streaming chat API| LLM[Ollama or another OpenAI-compatible LLM]
     API -->|local ONNX worker| ST[Supertonic]
-    API -->|HTTP PCM stream| K[Kokoro service]
+    API -->|captioned WAV segments| K[Kokoro service]
     Browser -->|camera frames and audio activity| CV[Independent CV service]
     API -->|scene and identity queries| CV
     CV --> OBJ[YOLO object detection]
@@ -129,14 +129,26 @@ Run the setup script from the repository root:
 ./backend/setup.sh
 ```
 
-It synchronizes the backend `uv` environment, downloads the configured
-Faster-Whisper model to `.cache/faster-whisper`, downloads the pinned
-Supertonic 3 ONNX assets to `backend/supertonic/assets`, pulls the local CPU
-Kokoro image when Docker is available, and prepares the configured CV assets.
-The Faster-Whisper model setup runs even when another STT provider is selected;
-this lets you switch to the local provider later without rebuilding the image.
-Run the script again after changing the Faster-Whisper model or the CV model
-configuration.
+On Windows, run `./backend/setup.ps1` in PowerShell. Both scripts check the
+backend environment offline before offering to install missing dependencies.
+They then use the same model setup helper. Existing assets are reported as
+already downloaded. Each missing model or image requires an explicit `Y`;
+Enter, `N`, and closed input skip it. Faster-Whisper and Supertonic assets are
+optional even when another provider is selected.
+
+Faster-Whisper uses the configured model cache. Supertonic uses
+`backend/supertonic/assets`. CV assets use the same paths as their runtime
+providers. Run setup again after changing a model selection or to install
+previously skipped assets. A selected provider still needs its assets before
+the application can use it.
+
+For Kokoro, setup detects NVIDIA GPUs with `nvidia-smi`, with a CUDA availability
+check as a fallback. It selects `ghcr.io/remsky/kokoro-fastapi-gpu:v0.9.2` when
+available and `ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2` otherwise. Intel and AMD
+GPUs do not select the CUDA image. A missing image is pulled only after `Y`;
+an existing image is reused. The script prints the matching `docker run`
+command, including `--gpus all` for GPU. GPU containers need a configured NVIDIA
+container runtime. Compose uses the image/runtime settings in `docker-compose.yml`.
 
 ### 4. Start the application
 
@@ -235,7 +247,7 @@ backend loads the configured CTranslate2 model once and reuses it for each
 recording. `faster_whisper_model`, `faster_whisper_device`,
 `faster_whisper_compute_type`, and `faster_whisper_download_root` select the
 model and runtime. The repository defaults are `base`, `cpu`, `int8`, and
-`.cache/faster-whisper`. The setup script downloads the model before startup;
+`.cache/faster-whisper`. The setup script offers to download the model before startup;
 the API does not fetch it during ordinary transcription.
 
 The **Nemotron** adapter streams 16-bit PCM chunks to a separate WebSocket
@@ -255,7 +267,8 @@ an OpenAI-compatible endpoint can be used by changing these settings.
 `llm_tool_mode: native` streams normal text with inline gesture tags and native
 name tool calls. The selected model and server must support native tool calls.
 Each turn receives a fresh CV snapshot with people, recognized names, object
-counts, and gestures observed in the last three seconds. Expired observations are unavailable.
+counts, and configurable recent visual history. Expired current observations
+are unavailable; retained windows can still describe past activity.
 The prompt and tool definition are in
 `backend/llm/prompts/system.txt` and `backend/llm/tools.py`.
 
@@ -266,35 +279,22 @@ styles into a dedicated worker, chooses an available supported accelerator
 when `tts_device: auto`, and falls back to CPU. `tts_supertonic_steps` trades
 inference work for quality/speed. `F1` and `M1` are the available voice styles.
 
-**Kokoro** can run locally in the Compose CPU container or behind another
-OpenAI-compatible speech API. Its model and service root are configured
-separately:
+**Kokoro** uses the Kokoro-FastAPI captioned-speech API. Configure its service root:
 
 ```yaml
-# Local Kokoro service on the Compose network
 tts_provider: kokoro
 tts_model: kokoro
-tts_url: http://kokoro:8880
+tts_url: http://localhost:8880
 ```
 
-For an authenticated hosted service, set `TTS_API_KEY` in `backend/.env`, then
-change the model and base URL, for example:
-
-```yaml
-tts_provider: kokoro
-tts_model: hexgrad/kokoro-82m
-tts_url: https://openrouter.ai/api/v1
-```
-
-OpenRouter documents the [TTS endpoint and supported formats](https://openrouter.ai/collections/text-to-speech-models/)
-and lists the [`hexgrad/kokoro-82m` model](https://openrouter.ai/hexgrad/kokoro-82m).
-
-The client builds `/v1/audio/speech` for a service root and `/audio/speech`
-when the configured base URL already ends in `/v1`. For local development
-outside Compose, use `http://localhost:8880`. Kokoro requests use raw PCM;
-the backend emits independently playable 250 ms WAV packets. The PCM route has
-no word-level timestamps, so word timings for lip sync and gesture alignment
-are estimated locally. Treat them as approximate.
+Compose sets `TTS_URL=http://kokoro:8880` for the backend container. The
+`TTS_URL` environment variable overrides `tts_url`. The client calls
+`/dev/captioned_speech` with WAV output and word timestamps enabled. It buffers
+each short speech segment until audio and timestamps are available, then sends
+them together. This increases first-audio latency compared with raw PCM streaming.
+Missing or invalid timestamps fail synthesis; the client does not estimate them.
+An OpenAI-compatible speech endpoint alone does not supply this API.
+See the [Kokoro-FastAPI captions documentation](https://github.com/remsky/Kokoro-FastAPI#captions).
 
 The frontend offers provider-specific voices. Current choices are `am_puck`
 and `af_heart` for Kokoro and `F1` and `M1` for Supertonic. A hosted model may
@@ -316,9 +316,9 @@ when integrating one.
    sentence after `min_speech_segment_words`; it forces a split at
    `max_speech_segment_words` when needed. The checked-in values are 15 and 25
    words.
-5. In `native` LLM mode, text can reach TTS while later text is still being
-   generated. In `structured` mode (the checked-in selection), the backend
-   first buffers and validates the complete action plan, then starts speech.
+5. In the configured `native` LLM mode, text can reach TTS while later text
+   is still being generated. Each Kokoro segment waits for its matching audio
+   and provider timestamps before delivery.
    Audio requests are sent in segment and chunk order. Each segment queue is
    bounded so a slow client cannot accumulate unlimited audio in memory.
 6. The browser decodes each audio packet independently and passes audio and
@@ -329,6 +329,10 @@ when integrating one.
 
 ### Gesture and speech alignment
 
+See [Audio and gesture synchronization](docs/audio-gesture-synchronization.md)
+for the complete implementation flow, timing formulas, Mermaid diagrams, and
+configuration reference.
+
 The prompt allows a limited set of inline tags such as `[greeting]`,
 `[thinking]`, and `[nod_yes]`. `backend/inline_gestures.py` parses these tags
 incrementally, removes them from spoken/displayed text, and attaches each cue
@@ -336,12 +340,69 @@ to its following speech offset. The backend aligns cue offsets against the
 word timings returned by the active TTS adapter. If the word sequence does not
 match, it suppresses misaligned cues rather than triggering the wrong action.
 
-When Kokoro PCM timing estimates are used, gesture placement is approximate.
+Kokoro supplies provider word intervals. Each tag starts a speech block that
+continues until the next tag. The frontend preloads clips and plays each for
+at least `gesture_min_duration_seconds` (default 2), or its natural clip duration
+if longer. Speech keeps its original speed. When a block's speech finishes
+first, silence delays the next tagged phrase until the previous gesture finishes.
+Word and gesture timestamps shift with that silence, including across streamed
+packets. Longer speech blocks finish before the next gesture starts. The last
+gesture can finish after its audio ends.
+
+The Web Audio clock drives the mixer, with 100 ms transitions between gestures.
+Stop clears active gestures and pending pacing. Frame scheduling and provider
+alignment accuracy still limit synchronization precision.
+
+Set these values in `backend/config.yaml`, restart the backend, and reload the
+browser:
+
+```yaml
+gesture_min_duration_seconds: 2.0
+tts_volume_gain: 1.5
+```
+
+`tts_volume_gain` controls browser speech amplitude: 1.0 preserves the original
+volume, 1.5 boosts it, and 0 mutes it. Playback settings arrive through `/health`
+and each speech packet. Volume gain does not change speech speed or timestamps.
+
 The front end gives explicit speech gestures priority over lower-priority
 camera responses and automatic talking motion. Name changes use a validated
 `rename_person` tool and are not inferred from arbitrary model output.
 
 ## Processes, threads, and model ownership
+
+### Visual history sent to the LLM
+
+Every model turn receives a new world snapshot. Tool follow-up requests also
+refresh that snapshot. Current scene counts stay separate from historical
+observations, including when the current camera frame expires.
+
+```yaml
+cv_window_seconds: 1.0
+cv_retained_windows: 30
+cv_world_history_seconds: 10.0
+cv_world_history_windows: 0
+```
+
+Increase `cv_world_history_seconds` to cover your speaking time and local model
+latency. For example, set it to `20.0` to retain the preceding twenty seconds
+of people, objects, recognized names, and gestures in model context. Alternatively,
+set `cv_world_history_windows: 10` to use the current window and nine preceding
+windows; a positive window count overrides seconds. Set both history values
+to zero to disable it. Increase `cv_retained_windows` when needed: seconds mode
+requires at least one extra window beyond the lookback. Restart both the CV
+service and conversation backend after changing these settings.
+
+Windows currently last one second. The manager publishes a summary when the
+capture clock crosses the boundary, then revises it as late inference finishes.
+History includes open windows and their latest results. Counts are unique
+tracks per window, not totals to add across windows. Gesture ages refer to
+capture time. Results still processing cannot appear until they finish.
+
+`cv_keypoint_history_seconds` controls the gesture model's temporal input. It
+does not set the LLM visual lookback.
+
+### Runtime ownership
 
 The application separates **coordination** from **inference**. A process is an
 operating-system address space with its own memory. A thread is an execution
@@ -393,7 +454,7 @@ flowchart LR
     UI <-->|camera WebSocket :8765| CVLOOP
     LOOP <-->|scene/identity WebSocket| CVLOOP
     LOOP <-->|HTTP chat stream| OLLAMA
-    LOOP <-->|HTTP PCM stream| KOKORO
+    LOOP <-->|captioned WAV segments| KOKORO
     LOOP -. optional provider URL .-> HOSTED
 ```
 
@@ -439,7 +500,7 @@ process. The same client can target a hosted endpoint by changing the base URL,
 model, and API key.
 
 Kokoro follows the same service boundary. The backend asynchronously requests
-`/v1/audio/speech` and consumes PCM bytes. With the Compose Kokoro service, the
+`/dev/captioned_speech` and consumes WAV audio with word timestamps. With the Compose Kokoro service, the
 model runs in its own CPU container. With a hosted speech endpoint, inference
 runs remotely. In either case, the backend owns request ordering, queueing,
 conversion to independently playable packets, gesture timing, and delivery to
@@ -703,6 +764,8 @@ process environment (and from `backend/.env` for direct host runs).
 | `LLM_API_KEY` | Bearer token for the selected chat endpoint | `not-needed` for local Ollama |
 | `min_speech_segment_words`, `max_speech_segment_words` | Natural-boundary and hard word limits for TTS requests | `15`, `25` |
 | `tts_max_concurrent_segments` | Maximum parallel TTS segment requests | `2` |
+| `gesture_min_duration_seconds` | Minimum gesture duration; longer clips keep their natural duration | `2.0` |
+| `tts_volume_gain` | Browser TTS amplitude multiplier; 0 mutes, 1 preserves source volume | `1.5` |
 | `cv_adapter_url` | Backend-to-CV WebSocket address | `ws://host.docker.internal:8765` from Compose |
 | `max_audio_bytes`, `history_turns` | Input audio limit and retained conversation history | `10000000`, `8` |
 
@@ -741,7 +804,7 @@ backend also accepts `{"type":"cancel"}`. Main server events include
 `transcript_partial`, `transcript`, `llm_delta`, `llm_complete`, `speech`,
 `metrics`, `error`, and `done`. Exact audio payloads include base64 audio,
 encoding, sample rate, word timing, segment/chunk indices, gesture cues, and
-estimated timing quality.
+provider timing quality for Kokoro.
 
 For direct synthesis, send a `start` message with `mode: "speak"` and a `text`
 value. The backend returns speech packets, metrics, and `done` without STT or
