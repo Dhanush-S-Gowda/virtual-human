@@ -1,8 +1,9 @@
 import { waitForAction } from "./ActionQueue.js";
 
 /** Play one FBX cycle and wait through its actual duration and pose return. */
-export async function playClipAction(avatar, url, signal, { armsOnly = false } = {}) {
+export async function playClipAction(avatar, url, signal, { armsOnly = false, onStart = null } = {}) {
   let release;
+  let cleanup;
   const cancelled = new Promise((resolve) => { release = resolve; });
   const cancel = () => {
     avatar.stopAnimation();
@@ -17,8 +18,10 @@ export async function playClipAction(avatar, url, signal, { armsOnly = false } =
     if (!clip || !Number.isFinite(clip.duration) || clip.duration <= 0) {
       throw new Error("Animation has no playable clip.");
     }
+    cleanup = onStart?.(clip.duration);
     await waitForAction(clip.duration * 1000, signal);
   } finally {
+    cleanup?.();
     signal.removeEventListener("abort", cancel);
     avatar.stopAnimation();
     if (!signal.aborted) {

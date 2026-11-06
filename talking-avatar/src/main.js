@@ -10,6 +10,7 @@ import { CLIP_ACTIONS, chooseClip, mountAnimationControls } from "./avatar/clipA
 import { createHeadPitchLimiter } from "./avatar/headPitch.js";
 import { GestureSpeechPacer } from "./avatar/GestureSpeechPacer.js";
 import { AudioGesturePlayer } from "./avatar/AudioGesturePlayer.js";
+import { LaughingMouth } from "./avatar/LaughingMouth.js";
 import { GestureTimeline } from "./avatar/GestureTimeline.js";
 import { TalkingGestures } from "./avatar/TalkingGestures.js";
 import { decodeSpeechAudio } from "./avatar/speechAudio.js";
@@ -60,6 +61,7 @@ const clipActions = Object.fromEntries(Object.keys(CLIP_ACTIONS).map((action) =>
 ]));
 const speechActions = new SpeechActions(() => Boolean(head?.isSpeaking));
 const audioGestures = new AudioGesturePlayer(() => head);
+const laughingMouth = new LaughingMouth(() => head);
 const gestureSpeechPacer = new GestureSpeechPacer();
 let playbackOptions = { gesture_min_duration_seconds: 2, tts_volume_gain: 1.5 };
 
@@ -80,6 +82,11 @@ const gestureTimeline = new GestureTimeline((action, cue) => {
         void talkingGestures.clear();
         listeningNods.stopNod();
         audioGestures.play(action, cue);
+        if (action === "laughing") {
+            laughingMouth.start(cue.time, Math.max(cue.duration, audioGestures.durationFor(action)));
+        } else {
+            laughingMouth.stop();
+        }
     }
 }, () => avatarActionQueue.busy || document.hidden);
 const cameraResponses = new CameraGestureResponses(
@@ -261,6 +268,7 @@ const sttManager = new STTManager({
         gestureTimeline.clear();
         gestureSpeechPacer.clear();
         audioGestures.clear();
+        laughingMouth.clear();
         void talkingGestures.clear();
         speechActions.clear();
         listeningNods.start();
@@ -583,6 +591,7 @@ async function playSpeechResult(result, generation, receivedAt = performance.now
                 if (generation !== speechGeneration) return;
                 const gestureScheduleStarted = performance.now();
                 gestureTimeline.schedule(paced.gestures, start, rate);
+                laughingMouth.scheduleSpeech(paced, start, rate);
                 const gestureScheduleMs = performance.now() - gestureScheduleStarted;
                 talkingGestures.until(start + duration / rate);
                 speechActions.startSpeech();
@@ -616,6 +625,7 @@ function stopSpeech() {
     gestureTimeline.clear();
     gestureSpeechPacer.clear();
     audioGestures.clear();
+    laughingMouth.clear();
     cameraResponses.clear();
     void talkingGestures.clear();
     speechActions.clear();
@@ -728,6 +738,7 @@ async function initializeAvatar() {
                             audioGestures.update(head.audioCtx.currentTime);
                             cameraResponses.update();
                             talkingGestures.update(head.audioCtx.currentTime);
+                            laughingMouth.update(head.audioCtx.currentTime);
                         }
                         limitHeadPitch(head);
                     },
@@ -919,7 +930,15 @@ function playCatalogAction(action, kind = "manual") {
     const spec = CLIP_ACTIONS[action];
     if (!spec) return;
     queueAvatarAction(spec.label, (avatar, signal) => playClipAction(
-        avatar, chooseClip(action), signal, { armsOnly: action === "talking" }), action === "talking" ? "talking" : kind);
+        avatar, chooseClip(action), signal, { armsOnly: action === "talking",
+            onStart: action === "laughing" ? (duration) => {
+                if (avatar.audioCtx.state !== "running") {
+                    void avatar.audioCtx.resume().catch(error => console.warn("Laughing mouth clock could not resume:", error));
+                }
+                const handle = laughingMouth.start(avatar.audioCtx.currentTime, duration);
+                return () => laughingMouth.stop(handle);
+            } : null,
+        }), action === "talking" ? "talking" : kind);
 }
 
 function queueAvatarAction(name, action, kind = "manual") {
@@ -928,6 +947,7 @@ function queueAvatarAction(name, action, kind = "manual") {
         await talkingGestures.interrupt();
         if (signal.aborted) return;
         listeningNods.stopNod();
+        laughingMouth.stop();
         resetAvatarGesture(avatar);
         await action(avatar, signal);
     }), { kind });

@@ -237,6 +237,24 @@ pose layers. The head-pitch limiter runs after the gesture update. Automatic
 talking motion and camera reactions yield while a foreground gesture is busy.
 An explicit `[talking]` clip uses arm tracks; background talking remains optional.
 
+### Laughing mouth motion
+
+The laughing FBX clip supplies body motion. `LaughingMouth` adds repeated open
+and closed HA mouth shapes during that clip, driven by the same audio clock.
+It prefers `viseme_aa`, then falls back to a mapped `jawOpen` or `mouthOpen`.
+The shape pulses about 2.4 times per second and finishes at 60% of the gesture
+duration, with short entry/exit envelopes and a light smile. Tagged laughter
+and the manual Laughing control both use it.
+
+The layer receives remapped spoken-word intervals from `onAudioStart`. During
+those intervals, normal TTS lip sync takes priority. During quiet gesture time,
+the HA shapes keep the avatar visibly laughing. This layer animates the face;
+it does not synthesize extra audio. TalkingHead's realtime morph channel applies
+the shapes before its morph update, preserving fixed face controls and queued
+speech visemes. Completion, interruption, and Stop release owned channels.
+Manual clip cleanup uses an ownership handle so an older clip cannot clear a
+newer laugh.
+
 ## 5. Settings and cancellation
 
 Edit `backend/config.yaml`, restart the backend, and reload the browser:
@@ -345,6 +363,7 @@ holds the next tagged phrase longer than the configured minimum.
 | Silence insertion and word/cue remapping | [GestureSpeechPacer.js](../talking-avatar/src/avatar/GestureSpeechPacer.js) |
 | Due cue scheduling | [GestureTimeline.js](../talking-avatar/src/avatar/GestureTimeline.js) |
 | Clip duration, shared mixer and cross-fades | [AudioGesturePlayer.js](../talking-avatar/src/avatar/AudioGesturePlayer.js) |
+| HA mouth motion and spoken-word priority | [LaughingMouth.js](../talking-avatar/src/avatar/LaughingMouth.js) |
 | Actual audio source start and lip sync | [talkinghead.mjs](../talking-avatar/src/talkinghead/talkinghead.mjs) |
 | CV capture windows, revisions and visual history | [window_manager.py](../backend/cv/window_manager.py) |
 | Compact current/historical context | [world.py](../backend/world.py) |
