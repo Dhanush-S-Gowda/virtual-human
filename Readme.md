@@ -252,10 +252,11 @@ The application calls the OpenAI-compatible Chat Completions API using
 configuration for offline/private inference. Other local servers that expose
 an OpenAI-compatible endpoint can be used by changing these settings.
 
-`llm_tool_mode: structured` buffers and validates a compact response plan before
-speaking it. This prevents partial JSON or invalid actions from reaching the
-avatar. `llm_tool_mode: native` uses streaming text and native tool calls where
-the selected model/server supports them. The prompt and action schema are in
+`llm_tool_mode: native` streams normal text with inline gesture tags and native
+name tool calls. The selected model and server must support native tool calls.
+Each turn receives a fresh CV snapshot with people, recognized names, object
+counts, and gestures observed in the last three seconds. Expired observations are unavailable.
+The prompt and tool definition are in
 `backend/llm/prompts/system.txt` and `backend/llm/tools.py`.
 
 ### Speech synthesis

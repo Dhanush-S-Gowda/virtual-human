@@ -367,3 +367,4 @@ cv/yolov8n-pose.pt
 *.pt
 backend/assets/cv/
 backend/data/
+backend/metrics.csv

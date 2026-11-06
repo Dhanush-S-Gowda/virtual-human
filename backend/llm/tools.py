@@ -7,7 +7,6 @@ import unicodedata
 from websockets import WebSocketException
 
 from world import cv_request
-from inline_gestures import TAGS
 
 
 def tool(name, description, properties, required):
@@ -26,23 +25,13 @@ def tool(name, description, properties, required):
     }
 
 
-AVATAR_ACTIONS = {"gesture": tuple(TAGS), "emotion": ()}
-
-
 TOOLS = [
     tool(
         "rename_person",
-        "Set a visible person's preferred name when the user requests it.",
+        "Remember a person's name when they introduce themselves (for example, 'my name is Ganush' or 'I'm Ganush') or ask you to remember it. Use the current speaker's visible track_id from world state for a self introduction. If multiple people are visible and the speaker is not identified, ask who to remember instead of guessing.",
         {"track_id": {"type": "integer"}, "name": {"type": "string"}},
         ["track_id", "name"],
     ),
-    tool(
-        "gesture",
-        "Legacy dispatch for catalog animations. Model replies use the allowed inline tags instead.",
-        {"action": {"type": "string", "enum": list(AVATAR_ACTIONS["gesture"])}},
-        ["action"],
-    ),
-
 ]
 MODEL_TOOLS = [item for item in TOOLS if item["function"]["name"] == "rename_person"]
 
@@ -84,10 +73,7 @@ def validate_action_plan(value):
         name, args = action["name"], action["arguments"]
         if not isinstance(name, str) or not isinstance(args, dict):
             raise ValueError("Invalid action types.")
-        if name in {"gesture", "emotion"}:
-            if set(args) != {"action"} or not isinstance(args["action"], str) or args["action"] not in AVATAR_ACTIONS[name]:
-                raise ValueError("Unsupported avatar action.")
-        elif name == "rename_person":
+        if name == "rename_person":
             if (set(args) != {"track_id", "name"} or type(args["track_id"]) is not int
                     or not isinstance(args["name"], str) or not args["name"].strip()
                     or len(args["name"]) > 80
@@ -134,14 +120,6 @@ async def execute_tool(
         args = json.loads(arguments) if isinstance(arguments, str) else arguments
         if not isinstance(args, dict):
             raise ValueError("Tool arguments must be an object.")
-        if name in {"gesture", "emotion"}:
-            if (set(args) != {"action"} or not isinstance(args["action"], str)
-                    or args["action"] not in AVATAR_ACTIONS[name]):
-                raise ValueError("Unsupported avatar action.")
-            await on_action(
-                {"type": "avatar_action", "tool": name, "action": args["action"]}
-            )
-            return {"ok": True, "status": "dispatched", "action": args["action"]}
         if name != "rename_person":
             raise ValueError("Unknown tool.")
         if set(args) != {"track_id", "name"} or type(args["track_id"]) is not int:

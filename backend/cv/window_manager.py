@@ -636,6 +636,7 @@ class CVService(VirtualHumanAdapter):
         self._source_origin = None
         self._latest_objects = None
         self._latest_points = None
+        self._recent_gestures = {}
         self._tick_task = None
         self._publish_task = None
         self._outgoing = asyncio.Queue(maxsize=2)
@@ -689,6 +690,7 @@ class CVService(VirtualHumanAdapter):
                         await reset()
                 self.manager = WindowManager.from_settings(*self.providers, self.settings)
                 self._latest_objects = self._latest_points = None
+                self._recent_gestures.clear()
                 self._clock_origin = self._source_origin = None
                 self._owner = websocket
                 self._source_id = str(uuid.uuid4())
@@ -730,6 +732,7 @@ class CVService(VirtualHumanAdapter):
                     if self._latest_objects is None or record.frame_id >= self._latest_objects.frame_id:
                         self._latest_objects = record
                 if "keypoints" in record.completed:
+                    self._remember_gestures(record)
                     if self._latest_points is None or record.frame_id >= self._latest_points.frame_id:
                         self._latest_points = record
                 messages.append(self.frame_metadata(record))
@@ -788,20 +791,37 @@ class CVService(VirtualHumanAdapter):
             return {"people": [], "objects": [], "active_speaker": None, "windows": self._summaries(),
                     "frame_available": False, "source_id": self._source_id}
         scene = self.frame_metadata(record)
-        if self._latest_points and abs(self._latest_points.timestamp - record.timestamp) <= .3:
+        self._prune_gestures()
+        for person in scene["people"]:
+            person["actions"] = tuple(sorted(
+                gesture for (track_id, generation, gesture) in self._recent_gestures
+                if track_id == person["track_id"] and generation == person["generation"]))
+            person["mouth_openness"] = person["mouth_motion"] = None
+        if (self._latest_points and abs(self._latest_points.timestamp - record.timestamp) <= .3
+                and self.manager._watermark - self._latest_points.timestamp <= .3):
             # Association only: every point retains its own capture provenance.
             for person in scene["people"]:
-                person["actions"] = tuple(
-                    gesture for point in self._latest_points.keypoints if point.track_id == person["track_id"]
-                    for gesture in point.gestures
-                )
                 mouth = next((point for point in self._latest_points.keypoints
                               if point.track_id == person["track_id"] and point.schema == "mediapipe_lips"), None)
                 person["mouth_openness"] = mouth.mouth_openness if mouth else None
                 person["mouth_motion"] = mouth.mouth_motion if mouth else None
         scene.update(active_speaker=None, windows=self._summaries(), updated_at=time.time(),
-                     frame_available=True, source_id=self._source_id)
+                     frame_available=True, source_id=self._source_id, gesture_window_seconds=3)
         return scene
+
+    def _remember_gestures(self, record):
+        for point in record.keypoints:
+            generation = self.manager._track_generations.get(point.track_id)
+            for gesture in point.gestures:
+                key = (point.track_id, generation, gesture)
+                self._recent_gestures[key] = max(
+                    record.timestamp, self._recent_gestures.get(key, record.timestamp))
+        self._prune_gestures()
+
+    def _prune_gestures(self):
+        cutoff = self.manager._watermark - 3.
+        self._recent_gestures = {key: timestamp for key, timestamp in self._recent_gestures.items()
+                                 if timestamp >= cutoff}
 
     def _summaries(self):
         from dataclasses import asdict

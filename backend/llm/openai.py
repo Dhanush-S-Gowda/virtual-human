@@ -174,7 +174,7 @@ class OpenAIProvider:
         instruction = (
             "Return a JSON plan with reply_kind, actions and speech. "
             "Use speaker_identity with actions [] for speaker identification; otherwise use conversation. "
-            "Put gesture tags in speech as instructed. actions is [] except for requested rename_person tools. "
+            "Put gesture tags directly in speech as instructed. actions is [] except when calling rename_person to remember a self-introduced or explicitly requested name. "
             "speech is the brief spoken reply with optional allowed inline tags, without tool names or metadata. "
             "Actions accompany speech; after a tool failure, correct it or explain simply."
         )

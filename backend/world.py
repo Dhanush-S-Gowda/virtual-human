@@ -34,7 +34,8 @@ async def current_world(speaker_hint=None):
         return {"status": "unavailable", "people": [], "objects": [], "speaker": None}, {}
     if not scene.get("frame_available", bool(scene.get("people") or scene.get("objects"))):
         return {"status": "unavailable", "people": [], "objects": [], "speaker": None}, scene
-    people = [{"track_id": person["track_id"], "name": person.get("display_name") or "Unknown"}
+    people = [{"track_id": person["track_id"], "name": person.get("display_name") or "Unknown",
+               "gestures": list(person.get("actions") or ())}
               for person in scene.get("people", [])]
     objects = [{"track_id": item["track_id"], "label": item["label"]}
                for item in scene.get("objects", [])]
@@ -48,4 +49,8 @@ async def current_world(speaker_hint=None):
         if match and speaker_hint.get("source_id") == scene.get("source_id"):
             speaker = {"track_id": match["track_id"], "name": match.get("display_name") or "Unknown",
                        "evidence": "push_to_talk+" + speaker_hint["method"]}
-    return {"status": "available", "people": people, "objects": objects, "speaker": speaker}, scene
+    return {"status": "available", "people": people, "objects": objects, "speaker": speaker,
+            "gesture_window_seconds": scene.get("gesture_window_seconds", 3),
+            "counts": {"people": len(people), "objects": len(objects),
+                       "recognized_faces": sum(bool(person.get("person_id"))
+                                               for person in scene.get("people", []))}}, scene

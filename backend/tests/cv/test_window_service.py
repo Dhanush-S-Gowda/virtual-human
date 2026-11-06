@@ -99,3 +99,42 @@ def test_frame_metadata_marks_empty_landmark_completion_and_errors():
     assert metadata["seq"] == 42
     assert metadata["timestamp"] == 1.25
     assert metadata["errors"] == record.errors
+
+
+def test_scene_retains_all_gestures_in_three_second_window():
+    from dataclasses import replace
+    from backend.cv.events import FrameRecord
+    from backend.cv.keypoint_det.base import KeypointDetection
+    from backend.cv.object_det.base import ObjectDetection
+
+    service = CVService(Objects(), Faces(), Points(), settings)
+    service.manager._track_generations[1] = 10
+    record = FrameRecord(
+        frame_id=1, timestamp=1., width=640, height=480,
+        objects=(ObjectDetection(1, "person", .9, (0, 0, 10, 10)),),
+        keypoints=(KeypointDetection(1, "test", ((1., 2., .9),), ("wave",)),),
+        completed=("objects", "keypoints"),
+    )
+    service._remember_gestures(record)
+    second = replace(record, frame_id=2, timestamp=2., keypoints=(
+        replace(record.keypoints[0], gestures=("thumbs_up",)),))
+    service._remember_gestures(second)
+    # New frames without gestures must not erase recent observations.
+    service._latest_objects = replace(record, frame_id=3, timestamp=3.9, keypoints=())
+    service._latest_points = replace(service._latest_objects, completed=("keypoints",))
+    service._remember_gestures(service._latest_points)
+    service.manager._watermark = 4.
+    scene = service.get_current_scene()
+    assert scene["people"][0]["actions"] == ("thumbs_up", "wave")
+    assert scene["gesture_window_seconds"] == 3
+    service.manager._watermark = 4.01
+    assert service.get_current_scene()["people"][0]["actions"] == ("thumbs_up",)
+    # A recycled track ID must not inherit the previous person's gestures.
+    service.manager._track_generations[1] = 11
+    assert service.get_current_scene()["people"][0]["actions"] == ()
+    service.manager._track_generations[1] = 10
+    service._latest_objects = replace(record, timestamp=5.1, keypoints=())
+    service.manager._watermark = 5.1
+    assert service.get_current_scene()["people"][0]["actions"] == ()
+    service.manager._watermark = 6.2
+    assert not service.get_current_scene()["frame_available"]

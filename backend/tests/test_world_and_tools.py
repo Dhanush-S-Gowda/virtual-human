@@ -15,9 +15,9 @@ import llm.tools as model_tools
 
 
 @pytest.mark.asyncio
-async def test_world_contains_all_objects_people_and_validated_speaker_but_no_gestures(monkeypatch):
+async def test_world_contains_counts_current_gestures_people_and_validated_speaker(monkeypatch):
     scene = {"frame_available": True, "source_id": "camera", "people": [
-        {"track_id": 1, "generation": 10, "display_name": "Dan", "actions": ["wave"]},
+        {"track_id": 1, "generation": 10, "person_id": "dan", "display_name": "Dan", "actions": ["wave"]},
         {"track_id": 2, "generation": 20, "display_name": None}], "objects": [
         {"track_id": 3, "label": "cup"}, {"track_id": 4, "label": "cup"},
         {"track_id": 5, "label": "chair"}], "active_speaker": None}
@@ -28,7 +28,8 @@ async def test_world_contains_all_objects_people_and_validated_speaker_but_no_ge
     assert len(state["objects"]) == 3
     assert state["people"][1]["name"] == "Unknown"
     assert state["speaker"]["name"] == "Dan"
-    assert "wave" not in json.dumps(state)
+    assert state["people"][0]["gestures"] == ["wave"]
+    assert state["counts"] == {"people": 2, "objects": 3, "recognized_faces": 1}
     assert "generation" not in json.dumps(state)
     for change in ({"generation": 9}, {"source_id": "previous camera"}, {"track_id": True}):
         stale, _ = await world.current_world({**hint, **change})
@@ -47,12 +48,12 @@ async def test_unavailable_camera_is_not_an_empty_room(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("name", "action"), [("gesture", action) for action in model_tools.TAGS])
-async def test_all_supported_avatar_tools_dispatch_only_the_allowlisted_action(name, action):
+@pytest.mark.parametrize(("name", "action"), [("gesture", "greeting"), ("emotion", "happy")])
+async def test_gesture_tools_are_rejected(name, action):
     sink = AsyncMock()
     result = await model_tools.execute_tool(name, {"action": action}, {}, sink)
-    assert result["ok"]
-    sink.assert_awaited_once_with({"type": "avatar_action", "tool": name, "action": action})
+    assert not result["ok"]
+    sink.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -102,27 +103,31 @@ async def test_model_sees_world_state_and_tool_result_before_its_spoken_conclusi
         async def stream_events(self, messages, tools):
             self.calls.append(json.loads(json.dumps(messages)))
             if len(self.calls) == 1:
-                yield {"type": "tool_call", "name": "gesture", "arguments": '{"action":"greeting"}', "id": "call-1"}
+                yield {"type": "tool_call", "name": "rename_person", "arguments": '{"track_id":7,"name":"Maya"}', "id": "call-1"}
             else:
                 assert messages[-1]["role"] == "tool"
-                assert json.loads(messages[-1]["content"])["status"] == "dispatched"
+                assert json.loads(messages[-1]["content"])["ok"]
                 yield {"type": "text", "text": "Hello there."}
 
     llm, sink = ToolLLM(), AsyncMock()
     state = {"status": "available", "people": [{"track_id": 7, "name": "Maya"}],
              "objects": [{"track_id": 8, "label": "cup"}], "speaker": {"track_id": 7, "name": "Maya"}}
+    monkeypatch.setattr(model_tools, "cv_request", AsyncMock(return_value={"data": {"ok": True}}))
+    refreshed = {**state, "objects": [], "people": [{"track_id": 7, "name": "Maya", "gestures": []}]}
+    fresh_world = AsyncMock(return_value=(refreshed, {"people": [{"track_id": 7}]}))
+    monkeypatch.setattr(pipeline, "current_world", fresh_world)
     conversation = pipeline.Conversation(llm)
     reply = "".join([part async for part in conversation.stream_reply(
-        "Wave to me", world_state=state, scene={}, on_action=sink)])
+        "My name is Maya", world_state=state, scene={"people": [{"track_id": 7}]}, on_action=sink)])
     assert reply == "Hello there."
     assert "Maya" in llm.calls[0][0]["content"] and "cup" in llm.calls[0][0]["content"]
+    assert "cup" not in llm.calls[1][0]["content"]
     assert llm.calls[1][-2]["tool_calls"][0]["id"] == "call-1"
-    example = llm.calls[0][1:5]
-    assert "[greeting]" in example[1]["content"]
-    assert not any(message.get("tool_calls") for message in example)
+    assert len(llm.calls[0]) == 2  # Examples live in the concise system prompt.
     assert not any(message.get("tool_calls") for message in conversation.history)
     assert conversation.history[-1]["content"] == reply
-    sink.assert_awaited_once()
+    sink.assert_not_awaited()
+    fresh_world.assert_awaited_once()
 
 
 @pytest.mark.asyncio

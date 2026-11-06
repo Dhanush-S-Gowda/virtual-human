@@ -70,15 +70,13 @@ def test_examples_are_valid_plans_and_native_tools_have_matching_results():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["clapping", "enthusiasm", "thankful", "thinking"])
-async def test_clip_plan_dispatches_with_its_matching_reply(action):
-    validate_action_plan({"reply_kind": "conversation", "speech": "Sure!", "actions": [
-        {"name": "gesture", "arguments": {"action": action}}]})
-    llm = PlanLLM([{"speech": "Congratulations!", "actions": [
-        {"name": "gesture", "arguments": {"action": action}}]}])
+async def test_inline_gesture_speech_needs_no_tool(action):
+    speech = f"[{action}]Congratulations!"
+    llm = PlanLLM([{"speech": speech, "actions": []}])
     sink = AsyncMock()
     reply = "".join([part async for part in Conversation(llm).stream_reply("I passed!", on_action=sink)])
-    assert reply == "Congratulations!"
-    sink.assert_awaited_once_with({"type": "avatar_action", "tool": "gesture", "action": action})
+    assert reply == speech
+    sink.assert_not_awaited()
 
 
 class PlanLLM(FakeLLM):
@@ -95,13 +93,12 @@ class PlanLLM(FakeLLM):
 
 @pytest.mark.asyncio
 async def test_model_chosen_action_dispatches_before_speech_without_second_request():
-    llm = PlanLLM([{"speech": "Hello!", "actions": [
-        {"name": "gesture", "arguments": {"action": "greeting"}}]}])
+    llm = PlanLLM([{"speech": "[greeting]Hello!", "actions": []}])
     sink = AsyncMock()
     conversation = Conversation(llm)
     stream = conversation.stream_reply("Nice to meet you.", on_action=sink)
-    assert await anext(stream) == "Hello!"
-    sink.assert_awaited_once_with({"type": "avatar_action", "tool": "gesture", "action": "greeting"})
+    assert await anext(stream) == "[greeting]Hello!"
+    sink.assert_not_awaited()
     assert [part async for part in stream] == []
     assert len(llm.calls) == 1
     assert len(llm.calls[0]) == 2  # No fictional demonstration in structured mode.

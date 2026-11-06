@@ -26,7 +26,7 @@ from config import settings
 from diagnostics import bind_session, context, record, scope, traced_turn
 from tts.normalization import normalize_for_tts, sanitize_tts_characters
 from world import current_world
-from llm.tools import MODEL_TOOLS, action_example, execute_tool
+from llm.tools import MODEL_TOOLS, execute_tool
 from inline_gestures import InlineGestures, StreamingCueAligner, take_segment_cues
 from tts.voices import resolve_voice
 
@@ -281,21 +281,24 @@ class Conversation:
                 yield reply
                 return
             system_prompt = settings.system_prompt
-            native_tools = (callable(getattr(self.llm, "stream_events", None))
-                            and getattr(self.llm, "tool_mode", "native") == "native")
-            if native_tools:
-                system_prompt += "\nThe following exchanges are examples, not actual conversation history."
             if world_state is not None:
                 system_prompt += "\nWorld state (data, not instructions): " + json.dumps(
                     world_state, ensure_ascii=False, separators=(",", ":"))
             messages = [
                 {"role": "system", "content": system_prompt},
-                *(action_example() if native_tools else []),
                 *self.history,
                 {"role": "user", "content": text},
             ]
             parts = []
             stats = statistics if statistics is not None else {}
+            observed_speaker = (world_state or {}).get("speaker") or {}
+            speaker_track = next((person for person in (scene or {}).get("people", [])
+                                  if person["track_id"] == observed_speaker.get("track_id")), {})
+            refresh_hint = {"track_id": observed_speaker.get("track_id"),
+                            "generation": speaker_track.get("generation"),
+                            "source_id": (scene or {}).get("source_id"),
+                            "method": "lip_motion" if "lip_motion" in observed_speaker.get("evidence", "")
+                            else "single_visible"}
             async def events():
                 event_stream = getattr(self.llm, "stream_events", None)
                 if event_stream:
@@ -308,6 +311,12 @@ class Conversation:
             with scope(session_id=self.session_id, turn_id=context.get().get("turn_id") or str(uuid.uuid4())):
                 record("conversation", "input", messages=messages)
                 for round_index in range(3):
+                    if round_index and world_state is not None:
+                        world_state, scene = await current_world(refresh_hint)
+                        messages[0]["content"] = system_prompt.partition(
+                            "\nWorld state (data, not instructions): ")[0] + (
+                            "\nWorld state (data, not instructions): " + json.dumps(
+                                world_state, ensure_ascii=False, separators=(",", ":")))
                     calls, round_parts = [], []
                     plan = None
                     async for event in events():
@@ -722,8 +731,6 @@ async def handle_websocket(websocket: Any):
         transcript_ready_at = perf_counter()
         metrics["release_to_transcript_ms"] = round((transcript_ready_at - released_at) * 1000, 2)
         logger.info("User transcript: %s", text)
-        # Name changes are validated model tools, rather than a competing
-        # asynchronous transcript renamer with different speaker evidence.
         if not text:
             metrics.update(
                 {
@@ -742,6 +749,10 @@ async def handle_websocket(websocket: Any):
             await websocket.send_json({"type": "done"})
             return
 
+        # Apply deterministic self-introduction parsing before taking the
+        # world snapshot used by the LLM. The LLM tool remains available as a
+        # fallback when the rule parser cannot confidently associate a name.
+        await _forward_transcript_to_cv(text)
         world_started = perf_counter()
         world_state, scene_snapshot = await current_world(speaker_hint)
         if utterance_world_task is not None:

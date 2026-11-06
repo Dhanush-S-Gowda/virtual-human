@@ -34,6 +34,8 @@ async def test_stream_assembles_native_tool_arguments_and_reads_terminal_usage()
         provider = OpenAIProvider("http://test.invalid/v1", "test")
         output = [event async for event in provider.stream_events([{"role": "user", "content": "Wave"}], TOOLS)]
     assert requests[0]["tools"] == TOOLS
+    assert [item["function"]["name"] for item in TOOLS] == ["rename_person"]
+    assert "response_format" not in requests[0]
     assert requests[0]["stream_options"]["include_usage"]
     assert output[0] == {"type": "tool_call", "id": "call-1", "name": "gesture",
                          "arguments": '{"action":"wave"}'}

@@ -8,7 +8,7 @@ llm_provider: openai
 llm_url: https://openrouter.ai/api/v1
 # llm_model: unsloth/Qwen3.5-0.8B-GGUF:BF16
 llm_model: openai/gpt-6-luna
-llm_tool_mode: structured  # Model chooses validated speech + actions; native is also supported.
+llm_tool_mode: native  # Stream normal text with inline gestures and native name tool calls.
 llm_plan_temperature: 0.2  # Lower randomness for structured action decisions and their spoken replies.
 llm_extra_body:
   top_p: 0.8
