@@ -1,6 +1,35 @@
 name: virtual-human
 
 services:
+  nemotron-init:
+    image: python:3.13-slim
+    command: [python, /download_nemotron.py]
+    volumes:
+    - nemotron-models:/models
+    - ./download_nemotron.py:/download_nemotron.py:ro
+    restart: 'no'
+  nemotron:
+    image: nvcr.io/nvidia/nemo-speech.cpp:0.2.0
+    command:
+    - serve
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --asr-model
+    - /models/nemotron-speech-streaming-en-0.6b.q8_0.gguf
+    volumes:
+    - nemotron-models:/models:ro
+    depends_on:
+      nemotron-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, nemo-speech, health, --url, 'http://127.0.0.1:8080/ready']
+      interval: 10s
+      timeout: 10s
+      start_period: 120s
+      retries: 30
+    restart: unless-stopped
   kokoro:
     image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2
     environment:
@@ -46,18 +75,6 @@ services:
       ollama:
         condition: service_healthy
     restart: 'no'
-  speech-init:
-    build:
-      context: ..
-      dockerfile: devops/backend.Dockerfile
-    image: virtual-human-backend:local
-    command:
-    - python
-    - -c
-    - from stt.faster_whisper import _load_model; _load_model(local_files_only=False)
-    volumes:
-    - whisper-models:/app/.cache/faster-whisper
-    restart: 'no'
   backend:
     build:
       context: ..
@@ -74,14 +91,13 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
     volumes:
-    - whisper-models:/app/.cache/faster-whisper
     - backend-data:/app/data
     depends_on:
+      nemotron:
+        condition: service_healthy
       kokoro:
         condition: service_healthy
       ollama-init:
-        condition: service_completed_successfully
-      speech-init:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -176,8 +192,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  nemotron-models: null
   ollama-models: null
-  whisper-models: null
   backend-data: null
   cv-models: null
   cv-data: null

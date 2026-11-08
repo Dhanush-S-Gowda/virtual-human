@@ -109,6 +109,7 @@ class NemotronProvider:
                     raise ValueError(f"Nemotron did not create a session: {event.get('message', event)}")
                 await socket.send(json.dumps({"type": "session.update", "session": {
                     "sample_rate": sample_rate, "language": settings.nemotron_language,
+                    "model": settings.nemotron_model,
                 }}))
                 event = json.loads(await socket.recv())
                 if event.get("type") != "session.updated":

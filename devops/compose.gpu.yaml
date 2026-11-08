@@ -1,5 +1,7 @@
 # NVIDIA acceleration for this workstation. Compose loads this file automatically.
 services:
+  nemotron:
+    gpus: all
   backend:
     gpus: all
   cv:

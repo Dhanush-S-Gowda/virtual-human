@@ -27,7 +27,7 @@ access when you want to use these features.
 
 ```powershell
 docker compose ps -a
-docker compose logs -f ollama-init speech-init backend cv worker
+docker compose logs -f ollama-init nemotron-init nemotron backend cv worker
 docker compose down
 ```
 
@@ -43,6 +43,7 @@ jobs, and metrics. Do not use it for a routine restart.
 | redis | Celery broker DB 0 and task results DB 1 | Internal only |
 | worker | Celery metrics persistence and memory indexing | Internal only |
 | ollama / kokoro | Local chat and speech generation | Internal only |
+| nemotron | Streaming speech recognition | Internal only |
 | cv | Independent camera inference | Internal only |
 
 The browser uses `/api` and `/cv` on the app origin. Nginx proxies these routes,
@@ -57,8 +58,14 @@ changing Docker settings. If you change `llm_model`, also change the initializer
 command in Compose. Ollama uses structured JSON plans and disabled thinking
 output to avoid native XML tool parsing errors and unwanted control markers.
 
-Chat and speech use the RTX GPU under the override. Camera and Faster-Whisper
-use CPU. Speech segments use 8-word minimum and 12-word maximum lengths, with
+Nemotron starts with Compose. The `nemotron-init` service downloads the English
+0.6B GGUF model into the `nemotron-models` volume. Later starts reuse this file.
+The backend connects to `ws://nemotron:8080/v1/audio/transcriptions/realtime`
+after the speech server passes its readiness check. No host speech server is
+required. Check `docker compose logs nemotron-init nemotron` if startup fails.
+
+Chat, speech recognition, and speech generation use the RTX GPU under the
+override. Camera uses CPU. Speech segments use 8-word minimum and 12-word maximum lengths, with
 one synthesis request at a time. The first model load is slower than warm use.
 
 Speech speed tags use `[speed:0.85]`, `[speed:1.2]`, and `[speed:1.0]`. The parser

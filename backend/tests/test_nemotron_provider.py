@@ -46,6 +46,7 @@ async def test_live_socket_audio_precedes_release_and_llm_gets_only_full_transcr
         update = json.loads(await socket.recv())
         assert update["session"]["sample_rate"] == 16000
         assert update["session"]["language"] == "en-US"
+        assert update["session"]["model"] == settings.nemotron_model
         await socket.send(json.dumps({"type": "session.updated"}))
         async for message in socket:
             if isinstance(message, bytes):
