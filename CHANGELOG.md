@@ -1,11 +1,38 @@
 # Changelog
 
-## Unreleased — local demo integration
+Local change owner: **Bhvan Madhusudhan**. Upstream commits retain their original
+authorship. Entries describe implemented changes and the checks actually run.
 
-Change owner: **Bhvan Madhusudhan**.
+## 2026-11-08 - Folder guides and workspace cleanup
 
-This entry covers the local changes made during this implementation session.
-It does not claim authorship of upstream commits.
+### Added
+
+- Added a README to each maintained application folder and subfolder: 28 guides
+  across backend, frontend, DevOps, and documentation. The guides explain
+  responsibilities, important files, related folders, and relevant commands.
+- Added focused guides for runtime architecture, configuration and stored data,
+  host development and verification, and troubleshooting under `docs/`.
+- Added a Virtual Human integration section to the existing TalkingHead README.
+  Preserved upstream documentation and licenses, including Supertonic guides.
+
+### Changed
+
+- Shortened the root README to the demo commands, folder map, service overview,
+  and links to detailed guides. Moved the technical explanations into `docs/`.
+- Grouped changelog entries and corrected the previous full-suite result to
+  321 backend tests, with 109 frontend tests, 7 subtests, and 1 optional skip.
+
+### Removed
+
+- Removed empty `auth/`, `deploy/`, and `.local/keycloak/` leftovers from the
+  retired sign-in setup. Removed the empty `.local/` container folder as well.
+- Removed obsolete root `scripts/` and `tts-server/` folders after verifying
+  they contained only generated Python bytecode and no tracked source files.
+
+## Local demo integration ? unreleased
+
+The application layout and demo improvements below are recorded in commit
+`96ebe34`. The earlier upstream changes are listed separately.
 
 ### Added
 
@@ -26,20 +53,13 @@ It does not claim authorship of upstream commits.
 
 ### Changed
 
-- Verified the folder reorganization: 321 backend tests and 7 subtests passed
-  (1 optional model test skipped), and 109 frontend tests passed. Both Docker
-  images built; GPU and CPU Compose files validated; the rebuilt app and API
-  health endpoints returned HTTP 200.
-
 - Organized the application into `backend/`, `frontend/`, and `devops/`.
   Moved container builds, Nginx configuration, GPU overrides, and the Windows
   launcher under `devops/`. Retained the root Compose entry point and updated
   asset synchronization, build paths, commands, and documentation.
-
 - Refreshed the README with separate GPU, CPU-only, and host setup steps,
   current service routing, speech controls, Celery/Redis storage, and checks.
   Removed obsolete sign-in and Docker configuration instructions.
-
 - Replaced the frontend preview server with a multi-stage Node/Nginx image.
   Builds include the shared TalkingHead catalog and avatar assets.
 - Added Docker-specific local model settings. Model initialization downloads
@@ -103,8 +123,9 @@ It does not claim authorship of upstream commits.
 
 ### Validation and limits
 
-The latest full review passed 320 backend tests and 109 frontend tests, including
-7 speech-speed parameter subtests. One optional MediaPipe model-assets test was
+The full regression run after folder reorganization passed 321 backend tests,
+109 frontend tests, and 7 subtests. These results predate the documentation-only
+cleanup recorded above. One optional MediaPipe model-assets test was
 skipped because its downloaded assets were not mounted into the test container.
 New regression tests cover a real Redis outage, microphone cancellation, and
 literal rendering of camera identity data. Both Docker image builds passed.

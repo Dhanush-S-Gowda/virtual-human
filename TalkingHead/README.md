@@ -1,5 +1,18 @@
 # Talking Head (3D)
 
+## Use in Virtual Human
+
+This shared directory provides avatar models, animations, the animation catalog,
+and site settings used by the [frontend](../frontend/README.md). The application
+runtime is in `frontend/src/talkinghead/`. Docker copies shared avatars into the
+frontend build. The [asset sync script](../backend/scripts/README.md) updates
+deployable gesture clips and the model prompt from the shared animations.
+
+The remaining sections are the upstream library guide. Preserve the
+[license](LICENSE) and upstream attribution when changing these files.
+See the [project README](../README.md) for the local demo setup.
+
+
 
 ### Demo Videos
 
