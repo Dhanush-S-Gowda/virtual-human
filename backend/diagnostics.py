@@ -57,7 +57,13 @@ def scope(**values):
     try:
         yield
     finally:
-        context.reset(token)
+        try:
+            context.reset(token)
+        except ValueError:
+            # Async-generator cleanup can run in a different task context.
+            logging.getLogger(__name__).debug(
+                "Diagnostic context was already detached during cleanup."
+            )
 
 
 @contextmanager

@@ -1,0 +1,10 @@
+metric,count,denominator,measured_turns
+Recorded turns,20,,
+Successful turns,20,20,
+No-speech turns,0,20,
+Other non-success turns,0,20,
+Total turns under 10 seconds,13,20,
+Total turns under 20 seconds,19,20,
+Total turns under 30 seconds,20,20,
+TTS segments,31.0,,20
+Rejected gesture tags,1.0,,20

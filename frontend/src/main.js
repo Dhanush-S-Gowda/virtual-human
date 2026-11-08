@@ -62,9 +62,13 @@ const speechActions = new SpeechActions(() => Boolean(head?.isSpeaking));
 const audioGestures = new AudioGesturePlayer(() => head);
 const laughingMouth = new LaughingMouth(() => head);
 const gestureSpeechPacer = new GestureSpeechPacer();
-let playbackOptions = { gesture_min_duration_seconds: 2, tts_volume_gain: 1.5 };
+let playbackOptions = { gesture_min_duration_seconds: 2, tts_volume_gain: 1.5, gesture_pacing: "speech" };
 
 function applyPlaybackSettings(settings) {
+    if (["speech", "complete"].includes(settings?.gesture_pacing)) {
+        playbackOptions.gesture_pacing = settings.gesture_pacing;
+        gestureSpeechPacer.mode = settings.gesture_pacing;
+    }
     if (Number.isFinite(settings?.gesture_min_duration_seconds) && settings.gesture_min_duration_seconds > 0) {
         playbackOptions.gesture_min_duration_seconds = settings.gesture_min_duration_seconds;
     }
@@ -320,6 +324,13 @@ const sttManager = new STTManager({
             if (action) speechActions.add(action);
         } else if (event.type === "llm_delta") {
             conversationLog.appendReplyDelta(event.text);
+        } else if (event.type === "world_state") {
+            const scene = event.data;
+            const reason = { stale: "last frame expired", no_frames: "waiting for frames",
+                cv_timeout: "camera query timed out", cv_connection_error: "camera service unreachable" };
+            setSpeechLatency("scene", scene?.status === "available"
+                ? `camera → model: ${scene.counts?.people ?? 0} people, ${scene.counts?.objects ?? 0} objects`
+                : `camera → model: ${reason[scene?.reason] || "observation unavailable"}`);
         } else if (event.type === "speech") {
             const generation = speechGeneration;
             const receivedAt = performance.now();
@@ -847,6 +858,9 @@ async function initializeAvatar() {
         loadedAvatarId = callPreferences.avatar;
         avatarReady = true;
         head.start();
+        // Load once while idle so the first tagged reply does not wait for FBX downloads.
+        void audioGestures.prepare(Object.keys(CLIP_ACTIONS).map(action => ({ action })))
+            .catch(error => console.warn("Gesture preload failed; speech will retry:", error));
 
         avatarController.setHead(head);
         avatarController.setState(AvatarState.IDLE);

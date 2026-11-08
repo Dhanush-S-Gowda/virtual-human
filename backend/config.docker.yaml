@@ -8,7 +8,7 @@ llm_provider: openai
 # llm_url: http://127.0.0.1:8888/v1
 llm_url: http://ollama:11434/v1
 # llm_model: unsloth/Qwen3.5-0.8B-GGUF:BF16
-llm_model: qwen3.5:2b
+llm_model: qwen3.5:4b
 llm_tool_mode: structured  # JSON plans avoid small-model native XML tool parsing failures.
 llm_plan_temperature: 0.2  # Lower randomness for structured action decisions and their spoken replies.
 llm_extra_body:
@@ -17,15 +17,18 @@ llm_extra_body:
 
 # Ollama alternative. Comment the active LLM values above and uncomment these.
 # llm_url: http://ollama:11434/v1
-# llm_model: qwen3.5:2b
+# llm_model: qwen3.5:4b
 # llm_extra_body: {}
 
 # Speech-to-text. The model is downloaded by setup.sh.
 # Faster-whisper (local model)
 # stt_provider: faster-whisper
 # faster_whisper_model: base
-# faster_whisper_device: cpu
-# faster_whisper_compute_type: int8
+# The current Python image does not include the CUDA runtime libraries required
+# by CTranslate2, so Faster-Whisper remains on CPU until the image is rebuilt
+# with a compatible CUDA runtime.
+faster_whisper_device: cpu
+faster_whisper_compute_type: int8
 # faster_whisper_download_root: .cache/faster-whisper
 
 # Nemotron alternative. Start this service manually:
@@ -65,6 +68,8 @@ tts_speed_max: 1.5
 tts_volume_gain: 1.5
 # Each tagged gesture gets at least this long; longer clips finish naturally.
 gesture_min_duration_seconds: 2.0
+# speech follows word timestamps and cross-fades at each tag; complete adds pauses.
+gesture_pacing: speech
 # Wait for this many spoken words, then prefer a complete sentence.
 min_speech_segment_words: 8
 # Split at a complete word when no sentence boundary is available by this limit.

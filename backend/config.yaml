@@ -68,6 +68,8 @@ tts_speed_max: 1.5
 tts_volume_gain: 1.5
 # Each tagged gesture gets at least this long; longer clips finish naturally.
 gesture_min_duration_seconds: 2.0
+# speech follows word timestamps and cross-fades at each tag; complete adds pauses.
+gesture_pacing: speech
 # Wait for this many spoken words, then prefer a complete sentence.
 min_speech_segment_words: 15
 # Split at a complete word when no sentence boundary is available by this limit.

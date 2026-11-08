@@ -65,3 +65,22 @@ test("configured minimum changes gesture playback without speeding up longer cli
   p.minimumSeconds = 1;
   assert.equal(p.durationFor("clapping"), 2.4);
 });
+
+
+test("idle preload and arriving speech share one clip download", async () => {
+  let finish;
+  let calls = 0;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const avatar = { armature: new THREE.Object3D(), playAnimation: async () => {
+    calls++;
+    await pending;
+    return { clip: new THREE.AnimationClip("greeting", 3, []) };
+  } };
+  const p = new AudioGesturePlayer(() => avatar);
+  const warm = p.prepare([{ action: "greeting" }]);
+  const speech = p.prepare([{ action: "greeting" }]);
+  finish();
+  await Promise.all([warm, speech]);
+  assert.equal(calls, 1);
+  assert.equal(p.durationFor("greeting"), 3);
+});

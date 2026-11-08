@@ -8,6 +8,7 @@ export class AudioGesturePlayer {
     this.avatar = null;
     this.mixer = null;
     this.clips = new Map();
+    this.loading = new Map();
     this.active = null;
     this.retiring = [];
     this.clock = null;
@@ -22,19 +23,29 @@ export class AudioGesturePlayer {
     if (avatar !== this.avatar || this.root !== avatar.armature) {
       this.clear();
       this.clips.clear();
+      this.loading = new Map();
       this.avatar = avatar;
       this.root = avatar.armature;
     }
+    const loading = this.loading;
     await Promise.all([...new Set((cues || []).map(cue => cue.action))].map(async (name) => {
       if (this.clips.has(name)) return;
-      const url = chooseClip(name);
-      if (!url) throw new Error(`Unknown gesture: ${name}`);
-      const item = await avatar.playAnimation(url, null, 0, 0, 0.01, null, true);
-      if (!item?.clip || !(item.clip.duration > 0)) throw new Error(`Invalid gesture clip: ${name}`);
-      const clip = name === "talking" ? new THREE.AnimationClip(`${item.clip.name}-arms`, item.clip.duration,
-        item.clip.tracks.filter(track => /^(Left|Right)(Shoulder|Arm|ForeArm|Hand)/.test(track.name))) : item.clip;
-      if (this.avatar === avatar && this.root === avatar.armature) this.clips.set(name, clip);
+      if (loading.has(name)) return loading.get(name);
+      const promise = this.loadClip(avatar, name, loading);
+      loading.set(name, promise);
+      try { await promise; }
+      finally { loading.delete(name); }
     }));
+  }
+
+  async loadClip(avatar, name, loading) {
+    const url = chooseClip(name);
+    if (!url) throw new Error(`Unknown gesture: ${name}`);
+    const item = await avatar.playAnimation(url, null, 0, 0, 0.01, null, true);
+    if (!item?.clip || !(item.clip.duration > 0)) throw new Error(`Invalid gesture clip: ${name}`);
+    const clip = name === "talking" ? new THREE.AnimationClip(`${item.clip.name}-arms`, item.clip.duration,
+      item.clip.tracks.filter(track => /^(Left|Right)(Shoulder|Arm|ForeArm|Hand)/.test(track.name))) : item.clip;
+    if (this.loading === loading) this.clips.set(name, clip);
   }
 
   durationFor(name) { return Math.max(this.minimumSeconds, this.clips.get(name)?.duration || 0); }

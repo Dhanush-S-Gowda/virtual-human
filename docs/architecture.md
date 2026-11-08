@@ -44,13 +44,16 @@ word timings returned by the active TTS adapter. If the word sequence does not
 match, it suppresses misaligned cues rather than triggering the wrong action.
 
 Kokoro supplies provider word intervals. Each tag starts a speech block that
-continues until the next tag. The frontend preloads clips and plays each for
-at least `gesture_min_duration_seconds` (default 2), or its natural clip duration
-if longer. Speech keeps its original speed. When a block's speech finishes
-first, silence delays the next tagged phrase until the previous gesture finishes.
-Word and gesture timestamps shift with that silence, including across streamed
-packets. Longer speech blocks finish before the next gesture starts. The last
-gesture can finish after its audio ends.
+continues until the next tag. The frontend reads each loaded clip's actual
+duration and uses at least `gesture_min_duration_seconds` (default 2) as its
+planned lifetime. In the default `gesture_pacing: speech` mode, the next tagged
+word starts the next gesture with a 100 ms cross-fade, even if the previous
+clip has not finished. Speech and word timings are not delayed.
+
+Optional `gesture_pacing: complete` inserts silence before the next tagged
+phrase until the previous clip finishes. It shifts word and gesture timestamps
+together, including across packets. The last gesture can finish after its audio
+ends in either mode.
 
 The Web Audio clock drives the mixer, with 100 ms transitions between gestures.
 Stop clears active gestures and pending pacing. Frame scheduling and provider

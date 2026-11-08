@@ -1,6 +1,7 @@
 """Streaming client for OpenAI-compatible chat completion APIs."""
 
 import json
+import re
 import uuid
 from time import perf_counter
 from collections.abc import AsyncIterator
@@ -39,8 +40,8 @@ class OpenAIProvider:
         self.tool_mode = tool_mode
         self._plan_temperature = plan_temperature
         self._timeout = httpx.Timeout(
-            connect=10.0,
-            read=timeout,
+            connect=max(30.0, timeout),
+            read=max(180.0, timeout),
             write=30.0,
             pool=5.0,
         )
@@ -162,6 +163,12 @@ class OpenAIProvider:
                    "request_ms": (perf_counter() - started) * 1000,
                    "ttft_ms": (first_token - started) * 1000 if first_token else None,
                    "decode_ms": (last_token - first_token) * 1000 if first_token else 0}
+        except httpx.TimeoutException as exc:
+            status = "timeout"
+            raise ValueError(
+                "The LLM provider timed out while generating a response. "
+                "Please try a shorter request."
+            ) from exc
         except BaseException:
             status = "error_or_cancelled"
             raise
@@ -175,9 +182,28 @@ class OpenAIProvider:
             "Return a JSON plan with reply_kind, actions and speech. "
             "Use speaker_identity with actions [] for speaker identification; otherwise use conversation. "
             "Put gesture tags directly in speech as instructed. actions is [] except when calling rename_person to remember a self-introduced or explicitly requested name. "
-            "speech is the brief spoken reply with optional allowed inline tags, without tool names or metadata. "
+            "speech is the spoken reply with optional allowed inline tags, without tool names or metadata. "
             "Actions accompany speech; after a tool failure, correct it or explain simply."
         )
+        # A timed performance needs more text than the ordinary 1-3 sentence reply.
+        # This is a word budget, not a guarantee of exact synthesized duration.
+        request = next((message.get("content", "") for message in reversed(messages)
+                        if message.get("role") == "user"), "")
+        duration = re.search(r"\b(\d{1,3})\s*(?:s|secs?|seconds?)\b", request, re.I)
+        performance = re.search(r"\b(?:perform|performance|drama|monologue|story)\b", request, re.I)
+        seconds = int(duration[1]) if duration and performance else 0
+        token_budget = self._max_tokens
+        performance_instruction = None
+        if 5 <= seconds <= 120:
+            performance_instruction = (
+                f" The user requested a performance of approximately {seconds} seconds. "
+                f"Aim for about {round(seconds * 3.5)} spoken words, excluding tags. "
+                "Develop a beginning, emotional reversal, and ending rather than a few short sentences. "
+                "Use contrasting emotions, several supported gestures at their matching phrases, "
+                "and inline speed changes. Actual duration depends on synthesis and speed."
+            )
+            instruction += performance_instruction
+            token_budget = max(token_budget, min(2048, seconds * 16 + 128))
         plan_messages = [dict(message) for message in messages]
         # Keep current observations beside the actual request, after format
         # demonstrations and old history, so a small model cannot mistake an
@@ -201,19 +227,28 @@ class OpenAIProvider:
             snapshot = json.loads(world)
             speaker_name = (snapshot.get("speaker") or {}).get("name")
             speaker_guidance = (
-                "This is the person talking to you now. Answer speaker questions with this name."
+                "Only if asked who is speaking, answer with this name."
                 if speaker_name and speaker_name != "Unknown" else
-                "The speaker is unidentified. Say you cannot tell who is speaking.")
+                "The speaker is unidentified. Only if asked who is speaking, say you cannot identify them. "
+                "This does not mean the camera scene is unavailable. Answer other questions normally.")
             user_index = max(index for index, message in enumerate(plan_messages) if message["role"] == "user")
             plan_messages.insert(user_index, {"role": "system", "content":
                 "Current speaker name (data): " + json.dumps(speaker_name, ensure_ascii=False)
                 + ". " + speaker_guidance + "\n"
-                + marker.strip() + world})
+                + "For visible people or objects, use the current world state and counts, not speaker identity. "
+                + "A people-count question has reply_kind conversation. If status is available, "
+                + "you have camera observations; do not claim you lack camera access. "
+                + "If unavailable, explain that the current camera observation is unavailable, "
+                + "not that zero people are visible.\n"
+                + marker.strip() + " " + world})
+        if performance_instruction:
+            user_index = max(index for index, message in enumerate(plan_messages) if message["role"] == "user")
+            plan_messages.insert(user_index, {"role": "system", "content": performance_instruction})
         # Reuse the same SSE decoder and telemetry; this client has no structured
         # branch recursion because its mode is native and no native tools are sent.
         client = OpenAIProvider(
             self._base_url, self._model, api_key=self._api_key,
-            temperature=self._plan_temperature, max_tokens=self._max_tokens,
+            temperature=self._plan_temperature, max_tokens=token_budget,
             timeout=self._timeout.read, extra_body={**self._extra_body,
                 "response_format": {"type": "json_schema", "json_schema": {
                     "name": "avatar_action_plan", "strict": True, "schema": ACTION_PLAN_SCHEMA}}})
@@ -237,5 +272,15 @@ class OpenAIProvider:
                     "Your previous plan was invalid. Return only the schema, supported actions, and natural "
                     "spoken words without track identifiers, tool names, evidence labels or implementation details."})
                 continue
+            if performance_instruction and not attempt:
+                words = re.findall(r"\b\w+(?:['’]\w+)*\b", re.sub(r"\[[^\]]*\]", "", plan["speech"]))
+                minimum_words = round(seconds * 3.5 * .8)
+                if len(words) < minimum_words:
+                    plan_messages.append({"role": "system", "content":
+                        f"That draft has only {len(words)} spoken words. Expand it to at least "
+                        f"{minimum_words} spoken words to approach the requested {seconds} seconds. "
+                        "Return the full JSON plan with a developed story, not a summary. "
+                        "Do not count inline tags as spoken words."})
+                    continue
             yield {"type": "action_plan", **plan}
             return

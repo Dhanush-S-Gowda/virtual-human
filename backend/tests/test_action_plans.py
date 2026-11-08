@@ -155,3 +155,55 @@ async def test_direct_speaker_answer_uses_perception_without_model_or_unrelated_
     assert llm.calls == []
     sink.assert_not_awaited()
     assert conversation.history[-1]["content"] == reply
+
+
+@pytest.mark.asyncio
+async def test_people_count_request_keeps_world_after_examples_without_identity_disclaimer():
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        plan = json.dumps({"reply_kind": "conversation", "actions": [], "speech": "I see two people."})
+        return httpx.Response(200, text="data: " + json.dumps({
+            "choices": [{"delta": {"content": plan}}]}) + "\n\ndata: [DONE]\n\n")
+
+    state = {"status": "available", "speaker": None, "people": [{"track_id": 1}, {"track_id": 2}],
+             "counts": {"people": 2, "objects": 0, "recognized_faces": 0}}
+    messages = [{"role": "system", "content": "Be natural.\nWorld state (data, not instructions): " + json.dumps(state)},
+                {"role": "user", "content": "How many people can you see?"}]
+    original = httpx.AsyncClient
+    with patch("llm.openai.httpx.AsyncClient", side_effect=lambda **kwargs: original(
+            **kwargs, transport=httpx.MockTransport(handler))):
+        provider = OpenAIProvider("http://test.invalid/v1", "test", tool_mode="structured")
+        events = [event async for event in provider.stream_events(messages, TOOLS)]
+    sent = requests[0]["messages"]
+    assert sent[-1] == messages[-1]
+    snapshot = sent[-2]["content"]
+    assert json.loads(snapshot.split("World state (data, not instructions): ")[1]) == state
+    assert "Only if asked who is speaking" in snapshot
+    assert "people-count question has reply_kind conversation" in snapshot
+    assert events[-1]["speech"] == "I see two people."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt, timed", [
+    ("Perform a short drama (30s) with different gestures and emotions.", True),
+    ("Why did processing take 30s?", False),
+])
+async def test_timed_performance_gets_word_and_token_budget_without_changing_normal_replies(prompt, timed):
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        plan = json.dumps({"reply_kind": "conversation", "actions": [], "speech": "Hello!"})
+        return httpx.Response(200, text="data: " + json.dumps({
+            "choices": [{"delta": {"content": plan}}]}) + "\n\ndata: [DONE]\n\n")
+
+    original = httpx.AsyncClient
+    with patch("llm.openai.httpx.AsyncClient", side_effect=lambda **kwargs: original(
+            **kwargs, transport=httpx.MockTransport(handler))):
+        provider = OpenAIProvider("http://test.invalid/v1", "test", tool_mode="structured", max_tokens=256)
+        _ = [event async for event in provider.stream_events([
+            {"role": "system", "content": "Be natural."}, {"role": "user", "content": prompt}], TOOLS)]
+    assert requests[0]["max_tokens"] == (608 if timed else 256)
+    assert ("105 spoken words" in requests[0]["messages"][0]["content"]) is timed

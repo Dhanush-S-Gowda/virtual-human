@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import logging
 import uuid
 
 import websockets
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def cv_request(kind, **fields):
@@ -30,11 +33,15 @@ async def current_world(speaker_hint=None):
     try:
         response = await cv_request("get_scene")
         scene = response.get("data", {})
-    except (OSError, ValueError, TimeoutError, websockets.WebSocketException):
-        return {"status": "unavailable", "people": [], "objects": [], "speaker": None}, {}
+    except (OSError, ValueError, TimeoutError, websockets.WebSocketException) as exc:
+        reason = "cv_timeout" if isinstance(exc, TimeoutError) else "cv_connection_error"
+        logger.warning("Camera scene query failed: %s (%s)", reason, type(exc).__name__)
+        return {"status": "unavailable", "reason": reason, "people": [], "objects": [], "speaker": None}, {}
     history = {"recent_visual_history": scene["recent_visual_history"]} if "recent_visual_history" in scene else {}
+    freshness = {key: scene[key] for key in ("frame_id", "frame_age_ms") if key in scene}
     if not scene.get("frame_available", bool(scene.get("people") or scene.get("objects"))):
-        return {"status": "unavailable", "people": [], "objects": [], "speaker": None, **history}, scene
+        return {"status": "unavailable", "reason": scene.get("frame_status", "no_frames"),
+                "people": [], "objects": [], "speaker": None, **history, **freshness}, scene
     people = [{"track_id": person["track_id"], "name": person.get("display_name") or "Unknown",
                "gestures": list(person.get("actions") or ())}
               for person in scene.get("people", [])]
@@ -50,7 +57,7 @@ async def current_world(speaker_hint=None):
         if match and speaker_hint.get("source_id") == scene.get("source_id"):
             speaker = {"track_id": match["track_id"], "name": match.get("display_name") or "Unknown",
                        "evidence": "push_to_talk+" + speaker_hint["method"]}
-    return {"status": "available", "people": people, "objects": objects, "speaker": speaker, **history,
+    return {"status": "available", "people": people, "objects": objects, "speaker": speaker, **history, **freshness,
             "gesture_window_seconds": scene.get("gesture_window_seconds", settings.cv_world_history_seconds),
             "counts": {"people": len(people), "objects": len(objects),
                        "recognized_faces": sum(bool(person.get("person_id"))

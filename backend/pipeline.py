@@ -787,6 +787,12 @@ async def handle_websocket(websocket: Any):
             if world_state["speaker"] is None and utterance_state["speaker"] is not None:
                 world_state["speaker"] = utterance_state["speaker"]
         metrics["world_context_ms"] = round((perf_counter() - world_started) * 1000, 2)
+        logger.info("World state for turn: status=%s reason=%s frame=%s age_ms=%s counts=%s",
+                    world_state.get("status", "unavailable"), world_state.get("reason", "fresh"),
+                    world_state.get("frame_id"), world_state.get("frame_age_ms"),
+                    world_state.get("counts"))
+        record("conversation", "world_state", world_state=world_state)
+        await websocket.send_json({"type": "world_state", "data": world_state})
         metrics["transcript_ready_at"] = transcript_ready_at
         llm_started = perf_counter()
         llm_statistics = {}
@@ -853,6 +859,7 @@ async def handle_websocket(websocket: Any):
                 {"type": "speech", "index": segment_index,
                  "chunk_index": chunk_index, "text": segment_text, **payload,
                  "playback": {"tts_volume_gain": settings.tts_volume_gain,
+                              "gesture_pacing": settings.gesture_pacing,
                               "gesture_min_duration_seconds": settings.gesture_min_duration_seconds}}
             )
             metrics["tts_audio_chunks"] = metrics.get("tts_audio_chunks", 0) + 1

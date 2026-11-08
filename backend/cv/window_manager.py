@@ -837,9 +837,12 @@ class CVService(VirtualHumanAdapter):
             getattr(self.settings, "cv_world_history_seconds", 10.),
             getattr(self.settings, "cv_world_history_windows", 0))
         record = self._latest_objects
+        frame_age_ms = round(max(0., self.manager._watermark - record.timestamp) * 1000, 1) if record else None
         if record is None or self.manager._watermark - record.timestamp > 1.:
             return {"people": [], "objects": [], "active_speaker": None, "windows": self._summaries(),
                     "frame_available": False, "source_id": self._source_id,
+                    "frame_status": "no_frames" if record is None else "stale",
+                    "frame_id": record.frame_id if record else None, "frame_age_ms": frame_age_ms,
                     "recent_visual_history": history}
         scene = self.frame_metadata(record)
         self._prune_gestures()
@@ -858,6 +861,7 @@ class CVService(VirtualHumanAdapter):
                 person["mouth_motion"] = mouth.mouth_motion if mouth else None
         scene.update(active_speaker=None, windows=self._summaries(), updated_at=time.time(),
                      frame_available=True, source_id=self._source_id,
+                     frame_status="fresh", frame_id=record.frame_id, frame_age_ms=frame_age_ms,
                      recent_visual_history=history,
                      gesture_window_seconds=self.manager._watermark - self._gesture_cutoff())
         return scene

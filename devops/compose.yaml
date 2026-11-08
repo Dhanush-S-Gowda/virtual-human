@@ -40,7 +40,7 @@ services:
     - /bin/sh
     - -c
     command:
-    - ollama pull qwen3.5:2b && ollama run --think=false --keepalive=30m qwen3.5:2b
+    - ollama pull qwen3.5:4b && ollama run --think=false --keepalive=30m qwen3.5:4b
       'Reply with READY only.'
     depends_on:
       ollama:

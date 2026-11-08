@@ -19,7 +19,7 @@ function speech(actions, starts) {
 }
 
 test("the supplied gesture list waits for each speech block and a two-second gesture", () => {
-  const pacer = new GestureSpeechPacer();
+  const pacer = new GestureSpeechPacer(2, "complete");
   const actions = ["thankful", "greeting", "nod_yes", "nod_no", "thinking", "laughing", "thankful", "enthusiasm", "clapping"];
   const starts = [0, 5000, 5500, 5700, 6000, 6400, 6800, 7100, 7400];
   const input = speech(actions, starts);
@@ -40,7 +40,7 @@ test("the supplied gesture list waits for each speech block and a two-second ges
 });
 
 test("a gesture gate survives packet boundaries and preserves longer natural clips", () => {
-  const pacer = new GestureSpeechPacer();
+  const pacer = new GestureSpeechPacer(2, "complete");
   pacer.pace(context, buffer(1), speech(["clapping"], [0]), () => 4.2);
   assert.equal(pacer.remaining, 3.2);
   // Untagged continuation belongs to the previous speech block.
@@ -54,7 +54,7 @@ test("a gesture gate survives packet boundaries and preserves longer natural cli
 });
 
 test("minimum duration is configurable and cancellation clears the previous gate", () => {
-  const pacer = new GestureSpeechPacer(.75);
+  const pacer = new GestureSpeechPacer(.75, "complete");
   const first = pacer.pace(context, buffer(.2), speech(["greeting"], [0]), () => .5);
   assert.equal(first.gestures[0].duration_ms, 750);
   pacer.clear();
@@ -63,10 +63,26 @@ test("minimum duration is configurable and cancellation clears the previous gate
 });
 
 test("pacing respects source playback rate and tags at the same boundary", () => {
-  const pacer = new GestureSpeechPacer();
+  const pacer = new GestureSpeechPacer(2, "complete");
   const result = pacer.pace(context, buffer(1), speech(["greeting", "nod_yes"], [0, 0]), () => 1, 2);
   assert.deepEqual(result.gestures.map(cue => cue.at_ms), [0, 4000]);
   assert.deepEqual(result.gestures.map(cue => cue.duration_ms), [4000, 4000]);
   assert.deepEqual(result.wtimes, [4000, 4000]);
   assert.equal(result.audio.duration, 5);
+});
+
+
+test("speech pacing keeps contrasting gestures at their words despite different clip lengths", () => {
+  const pacer = new GestureSpeechPacer();
+  const input = speech(["thankful", "laughing", "thinking"], [0, 700, 1500]);
+  const audio = buffer(2);
+  const result = pacer.pace(context, audio, input,
+    action => ({ thankful: 6, laughing: 4, thinking: 8 })[action]);
+  assert.equal(result.audio, audio);
+  assert.deepEqual(result.wtimes, [0, 700, 1500]);
+  assert.deepEqual(result.gestures.map(cue => cue.at_ms), [0, 700, 1500]);
+  assert.deepEqual(result.gestures.map(cue => cue.duration_ms), [6000, 4000, 8000]);
+  const next = pacer.pace(context, buffer(1), speech(["clapping"], [0]), () => 5);
+  assert.equal(next.gestures[0].at_ms, 0);
+  assert.equal(next.audio.duration, 1);
 });

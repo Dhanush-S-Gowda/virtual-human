@@ -1,9 +1,8 @@
-/** Keep speech after each tag behind the preceding gesture's completion gate.
- * Silence is inserted into the audio buffer, so audio, lips and cues share one clock.
- */
+/** Align cues to speech; optional complete mode inserts silence for full clips. */
 export class GestureSpeechPacer {
-  constructor(minimumSeconds = 2) {
+  constructor(minimumSeconds = 2, mode = "speech") {
     this.minimumSeconds = minimumSeconds;
+    this.mode = mode;
     this.remaining = 0;
   }
 
@@ -16,6 +15,16 @@ export class GestureSpeechPacer {
       && Number.isFinite(cue.at_ms) && cue.at_ms >= 0 && cue.at_ms / 1000 < audio.duration)
       .map(cue => ({ ...cue, frame: Math.round(cue.at_ms * sampleRate / 1000) }))
       .sort((a, b) => a.frame - b.frame);
+    if (this.mode === "speech") {
+      this.remaining = 0;
+      return { ...result, audio, gestures: cues.map(cue => {
+        const duration = durationForAction(cue.action);
+        if (!(duration > 0) || !Number.isFinite(duration)) throw new Error(`Invalid gesture duration: ${cue.action}`);
+        return { action: cue.action, word_index: cue.word_index, at_ms: cue.at_ms,
+          duration_ms: Math.max(this.minimumSeconds, duration) * rate * 1000 };
+      }) };
+    }
+    if (this.mode !== "complete") throw new Error("Invalid gesture pacing mode.");
     const insertions = [];
     const gestures = [];
     let cursor = 0;

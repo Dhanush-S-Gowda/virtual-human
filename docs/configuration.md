@@ -18,7 +18,7 @@ the initializer does not read the YAML model setting automatically.
 
 The Docker defaults are:
 
-- Chat: Ollama `qwen3.5:2b`, structured JSON plans, and disabled thinking output.
+- Chat: Ollama `qwen3.5:4b`, structured JSON plans, and disabled thinking output.
 - Speech recognition: Faster-Whisper `base`, CPU, `int8`.
 - Speech synthesis: Kokoro, using CPU or the NVIDIA override.
 - Speech segments: 8-word minimum, 12-word maximum, one synthesis request at a time.
@@ -86,3 +86,31 @@ docker compose exec redis redis-cli ping
 docker compose exec worker celery -A background.celery_app inspect ping
 docker compose logs --tail 50 worker
 ```
+
+## Gesture pacing and camera context
+
+`gesture_pacing: speech` is the default. It keeps each gesture at the tagged
+word and cross-fades to the next cue without waiting for a full animation cycle.
+Use `gesture_pacing: complete` to add silence for full-clip completion.
+The frontend reads actual clip durations and preloads clips while idle.
+
+Before each model turn, the backend queries the camera service again. The
+Activity panel shows the people and object counts sent to the model, or a
+reason such as no frames, expired frame, timeout, or unreachable service.
+Backend logs include the frame ID, age, status, and counts. When diagnostic
+export is enabled, the `conversation/world_state` event records the full state.
+An unidentified speaker does not invalidate an available scene. Expired frames
+remain unavailable for current counts; history can describe past observations.
+
+Release-to-first-audio time includes transcription, model generation, and TTS.
+The current structured mode validates a complete reply plan before synthesis;
+response latency is not zero. Recording time is the user's speaking time and
+is included in total-turn timing. These server metrics do not include the full
+browser decode, asset preparation, and playback queue delay. Use the browser
+`Speech playback latency` log for receive-to-audio-start timing.
+
+In structured mode, the CSV `llm_first_token_ms` measures the first validated
+reply text available to the speech pipeline, not the first private JSON token.
+Provider first-token measurements are recorded separately in per-request
+`llm_requests` metrics. A timed performance gets a larger word/token budget
+and one retry for a short draft, but exact audio duration is not enforced.

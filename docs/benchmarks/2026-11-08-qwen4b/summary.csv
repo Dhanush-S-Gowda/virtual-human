@@ -1,0 +1,9 @@
+metric,field,samples,unit,mean,median,p95,minimum,maximum
+Recording time,recording_ms,20,seconds,6.0420615,5.04982,10.2274,3.15571,11.37247
+Speech to transcript,release_to_transcript_ms,20,seconds,1.2653235,0.930275,2.48538,0.8295399999999999,5.848
+Transcript to reply,transcript_to_reply_ms,20,seconds,1.6836065,1.450165,2.38151,0.93772,5.9189300000000005
+First validated reply text,llm_first_token_ms,20,seconds,1.651028,1.435165,2.37394,0.92892,5.89072
+Release to first audio chunk,release_to_first_audio_chunk_ms,20,seconds,3.723964,2.871,5.29014,1.99997,17.79809
+Total server turn including recording,turn_total_ms,20,seconds,9.9210535,9.025715000000002,16.83685,6.035609999999999,21.510630000000003
+Server turn after release,server_after_release_ms,20,seconds,3.878992,2.9141150000000002,5.464379999999999,2.00316,18.354920000000003
+Kokoro total,kokoro_total_ms,20,seconds,0.91690175,0.534022,1.782848,0.20219499999999999,6.570536

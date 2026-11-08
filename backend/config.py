@@ -41,10 +41,14 @@ DEFAULTS = {
     "tts_supertonic_steps": 2,
     "tts_volume_gain": 1.5,
     "gesture_min_duration_seconds": 2.0,
+    "gesture_pacing": "speech",
     "cv_world_history_seconds": 10.0,
     "cv_world_history_windows": 0,
 }
 config = {**DEFAULTS, **(config or {})}
+
+if config["gesture_pacing"] not in {"speech", "complete"}:
+    raise ValueError("gesture_pacing must be speech or complete.")
 
 for name in ("tts_speed", "tts_speed_min", "tts_speed_max"):
     value = config[name]

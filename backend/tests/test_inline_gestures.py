@@ -82,7 +82,7 @@ async def test_websocket_delivers_clean_text_audio_and_separate_word_timed_gestu
     deltas = [event["text"] for event in socket.events if event["type"] == "llm_delta"]
     assert "".join(deltas) == "Hello there."
     speech = next(event for event in socket.events if event["type"] == "speech")
-    assert speech["playback"] == {"gesture_min_duration_seconds": 1.25, "tts_volume_gain": 1.8}
+    assert speech["playback"] == {"gesture_min_duration_seconds": 1.25, "tts_volume_gain": 1.8, "gesture_pacing": "speech"}
     assert speech["gestures"] == [{"action": "greeting", "at_ms": 0., "word_index": 0, "duration_ms": 300.}]
 
 
@@ -108,7 +108,7 @@ async def test_health_exposes_configurable_playback_settings(monkeypatch):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app()), base_url="http://test") as client:
         response = await client.get("/health")
     assert response.status_code == 200
-    assert response.json()["playback"] == {"gesture_min_duration_seconds": .75, "tts_volume_gain": 2.0}
+    assert response.json()["playback"] == {"gesture_min_duration_seconds": .75, "tts_volume_gain": 2.0, "gesture_pacing": "speech"}
 
 
 @pytest.mark.parametrize("value, expected", [("0.1", .75), ("9", 1.5), ("1.2", 1.2), ("-3", .75)])

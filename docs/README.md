@@ -11,6 +11,7 @@ Use one guide for each task:
 | [Runtime architecture](architecture.md) | Follow conversation, model worker, and camera data flows |
 | [Audio and gesture synchronization](audio-gesture-synchronization.md) | Understand playback pacing and gesture alignment |
 | [Troubleshooting](troubleshooting.md) | Diagnose startup, device, and provider failures |
+| [Benchmarks](benchmarks/README.md) | Review recorded performance, reliability, source data, and calculation methods |
 | [Changelog](../CHANGELOG.md) | Review implemented changes and recorded validation |
 
 Component entry points: [backend](../backend/README.md),

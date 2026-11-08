@@ -19,7 +19,7 @@ flowchart TD
     kokoro --> alignment["Align each tag with its following spoken word"]
     alignment --> ordered["Send audio packets and cues in segment order"]
     ordered --> browser["Preload clips and decode audio"]
-    browser --> pacing["Insert silence before a new tag when the prior gesture needs time"]
+    browser --> pacing["Keep word-aligned cues; optional complete mode inserts silence"]
     pacing --> playlist["Queue paced audio and remapped word timing"]
     playlist --> clock["Actual audio start anchors the gesture timeline"]
     clock --> render["Drive lip sync and skeletal animation from audio playback"]
@@ -95,6 +95,7 @@ A simplified speech packet looks like this:
   "gesture_timing_quality": "provider",
   "playback": {
     "gesture_min_duration_seconds": 2.0,
+    "gesture_pacing": "speech",
     "tts_volume_gain": 1.5
   }
 }
@@ -110,11 +111,23 @@ preserves segment order and packet order. Bounded per-segment queues prevent a
 slow receiver from building an unlimited packet backlog. Native LLM text can
 reach TTS while later response text is still being generated.
 
-## 3. Gesture blocks and silence
+## 3. Gesture pacing modes
+
+The default `gesture_pacing: speech` keeps the original audio and word times.
+Each gesture starts at its tagged word. A later tag interrupts the previous
+clip with a 100 ms cross-fade, even if that clip has not finished. Clip lengths
+are read from the loaded animations, not assumed to be equal. Long animations
+do not delay the next phrase or move the next emotional gesture to later speech.
+Clips preload while the avatar is idle to reduce first-reply asset waits.
+
+Set `gesture_pacing: complete` to retain the full-clip behavior described below.
+This mode adds pauses and can make a performance longer than its spoken audio.
+
+### Complete mode: gesture blocks and silence
 
 A tag starts a speech block. The next tag ends that block. Speech and the
 block's gesture start together. The next block waits for both the speech and
-the current gesture to finish.
+the current gesture to finish in complete mode.
 
 Let:
 
@@ -159,7 +172,7 @@ The final gesture can finish after the last audio packet ends. There is no
 extra spoken phrase to hold at that point. The render loop continues to advance
 its animation against the audio context clock.
 
-### Worked example
+### Worked example in complete mode
 
 Assume both clips are shorter than two seconds and the configured minimum is
 two seconds. The provider audio contains `Hello` from 0.0 to 0.5 seconds and

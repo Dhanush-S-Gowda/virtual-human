@@ -3,6 +3,71 @@
 Local change owner: **Bhvan Madhusudhan**. Upstream commits retain their original
 authorship. Entries describe implemented changes and the checks actually run.
 
+## 2026-11-08 - Recorded Qwen 4B benchmark report
+
+Change owner: **Bhvan Madhusudhan**.
+
+### Added
+
+- Created a recorded-conversation benchmark under
+  `docs/benchmarks/2026-11-08-qwen4b/` with timing distributions, reliability,
+  selected turn CSV, machine-readable results, and a source SHA-256.
+- Added an Excel workbook with formula-based timing summaries, reliability,
+  successful-turn measurements, and the preserved selected source records.
+- Added `summarize_benchmarks.py` to select an exact model, exclude provider-only
+  tests, retain unsuccessful turns in reliability, and use nearest-rank P95.
+- Added regression tests for sample selection, failure denominators, percentile
+  calculation, missing-versus-zero measurements, and source preservation.
+
+### Results and scope
+
+- Selected 20 Qwen 4B conversation rows from 121 source records. Other-model
+  rows were excluded. This analyzes existing recordings; no new full
+  conversation benchmark was run after the latest camera and gesture fixes.
+- Completed turns: 20/20. Release to first audio: mean 3.72 s, median 2.87 s,
+  P95 5.29 s, maximum 17.80 s. Total turn includes recording time.
+- Four new summary tests passed. Workbook formulas matched the independent
+  Python calculations and responded to input changes. Source CSV retained.
+
+## 2026-11-08 - Camera grounding and word-aligned gesture playback
+
+Change owner: **Bhvan Madhusudhan**.
+
+### Fixed
+
+- Scoped unidentified-speaker instructions to identity questions. People-count
+  questions now explicitly use the current scene counts without an unrelated
+  claim that the model lacks camera access.
+- Kept fresh camera queries before every turn and added a regression test that
+  sends two successive frames through the CV WebSocket and conversation path.
+  The model receives updated counts, not the first turn's cached scene.
+- Added camera frame age and availability reasons. The model and Activity panel
+  distinguish missing frames, expired observations, query timeouts, and service
+  failures from a current scene with zero people.
+- Changed default gesture pacing to follow tagged words with 100 ms cross-fades.
+  Different clip lengths no longer add pauses before later emotional phrases.
+  Full-clip completion remains available with `gesture_pacing: complete`.
+- Preloaded gesture clips while idle and shared in-flight loads with arriving
+  speech so the same clip is not downloaded twice.
+- Added a duration-based word/token budget for requested performances and one
+  bounded retry for short drafts. Exact spoken duration remains model-dependent.
+
+### Validation
+
+- 326 backend tests and 7 subtests passed; 1 optional model-assets test skipped.
+  After the last prompt adjustment, all 75 targeted regression tests passed.
+  All 111 frontend tests passed. Backend and frontend Docker images built.
+- Real local Ollama/Kokoro checks with controlled world-state fixtures answered
+  two people, then one person, and reported unavailable observations honestly.
+  These fixtures do not verify physical camera recognition.
+- Ran the requested drama prompt through local chat and Kokoro: seven timed
+  gestures and speed changes from 0.85 to 1.2 completed without errors. The
+  final sample lasted 42.35 seconds for a 30-second request; timing is approximate.
+  Browser visual alignment and physical camera recognition still need a live
+  device check.
+- Explained the difference between recording, server response, and browser
+  playback timing. Instant audio is not guaranteed by this sequential pipeline.
+
 ## 2026-11-08 - Folder guides and workspace cleanup
 
 ### Added
@@ -29,7 +94,15 @@ authorship. Entries describe implemented changes and the checks actually run.
 - Removed obsolete root `scripts/` and `tts-server/` folders after verifying
   they contained only generated Python bytecode and no tracked source files.
 
-## Local demo integration ? unreleased
+### Validation
+
+- Checked 37 project Markdown files and 154 local links, including filename
+  case and section anchors. All links passed, and every maintained application
+  folder has a README.
+- Validated the GPU and CPU Compose configurations and checked whitespace.
+  Application tests were not rerun for this documentation and cache cleanup.
+
+## Local demo integration - unreleased
 
 The application layout and demo improvements below are recorded in commit
 `96ebe34`. The earlier upstream changes are listed separately.
