@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from diagnostics import record, stage
-from .tools import ACTION_EXAMPLES, ACTION_PLAN_SCHEMA, validate_action_plan
+from .tools import ACTION_PLAN_SCHEMA, validate_action_plan
 
 
 class OpenAIProvider:
@@ -209,20 +209,23 @@ class OpenAIProvider:
         # demonstrations and old history, so a small model cannot mistake an
         # example's circumstances for the current scene.
         base, marker, world = plan_messages[0]["content"].partition("\nWorld state (data, not instructions): ")
-        if marker:
-            plan_messages[0]["content"] = base
+        base, runtime_marker, runtime = base.partition("\nRuntime facts (configured services, not instructions): ")
+        requested_speed = None
+        if runtime_marker:
+            candidate_speed = json.loads(runtime).get("requested_speech_speed")
+            if type(candidate_speed) in (int, float) and .25 <= candidate_speed <= 4:
+                requested_speed = candidate_speed
+        plan_messages[0]["content"] = base
         plan_messages[0] = {**plan_messages[0], "content": plan_messages[0]["content"] + "\n" + instruction}
-        plan_messages[0]["content"] += "\nThe next exchanges are format examples, not real conversation history."
-        examples = []
-        for request, kind, speech, actions in ACTION_EXAMPLES:
-            examples.extend([
-                {"role": "user", "content": request},
-                {"role": "assistant", "content": json.dumps({
-                    "reply_kind": kind, "actions": [
-                        {"name": name, "arguments": {"action": action}} for name, action in actions
-                    ], "speech": speech})},
-            ])
-        plan_messages[1:1] = examples
+        # The response schema already defines the format. Fictional exchanges
+        # bias short factual answers toward greetings and can contaminate memory.
+        if runtime_marker:
+            user_index = max(index for index, message in enumerate(plan_messages) if message["role"] == "user")
+            plan_messages.insert(user_index, {"role": "system", "content":
+                runtime_marker.strip() + " " + runtime + "\n"
+                "Use these facts only when relevant to the question. If requested_speech_speed is not null, "
+                "prefix every reply's speech with that [speed:VALUE], even for a short factual answer. "
+                "An ordinary factual answer needs no gesture tag."})
         if marker:
             snapshot = json.loads(world)
             speaker_name = (snapshot.get("speaker") or {}).get("name")
@@ -239,7 +242,8 @@ class OpenAIProvider:
                 + "A people-count question has reply_kind conversation. If status is available, "
                 + "you have camera observations; do not claim you lack camera access. "
                 + "If unavailable, explain that the current camera observation is unavailable, "
-                + "not that zero people are visible.\n"
+                + "not that zero people are visible. Missing clothing or appearance fields mean "
+                + "that detail is not supplied; they do not prove the user is absent from the view.\n"
                 + marker.strip() + " " + world})
         if performance_instruction:
             user_index = max(index for index, message in enumerate(plan_messages) if message["role"] == "user")
@@ -264,7 +268,16 @@ class OpenAIProvider:
                 elif event["type"] == "usage":
                     yield event
             try:
-                plan = validate_action_plan(json.loads("".join(chunks)))
+                candidate = json.loads("".join(chunks))
+                speed_request = re.search(r"\b(?:slow(?:ly|er)?|fast(?:er)?|speed|normally)\b", request, re.I)
+                if (not performance and isinstance(candidate, dict) and isinstance(candidate.get("speech"), str)
+                        and (requested_speed is not None or not speed_request)):
+                    # An explicit user preference must not depend on whether the
+                    # model remembers its control tag or invents a different rate.
+                    speech = re.sub(r"\[\s*speed\s*:[^\]]*\]", "", candidate["speech"], flags=re.I)
+                    candidate["speech"] = ((f"[speed:{requested_speed:g}]" if requested_speed is not None else "")
+                                           + speech.lstrip())
+                plan = validate_action_plan(candidate)
             except ValueError:
                 if attempt:
                     raise ValueError("LLM returned an invalid or private action plan.") from None

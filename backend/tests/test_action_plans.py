@@ -177,6 +177,8 @@ async def test_people_count_request_keeps_world_after_examples_without_identity_
         provider = OpenAIProvider("http://test.invalid/v1", "test", tool_mode="structured")
         events = [event async for event in provider.stream_events(messages, TOOLS)]
     sent = requests[0]["messages"]
+    assert [message["content"] for message in sent if message["role"] == "user"] == [messages[-1]["content"]]
+    assert not any(message["role"] == "assistant" for message in sent)
     assert sent[-1] == messages[-1]
     snapshot = sent[-2]["content"]
     assert json.loads(snapshot.split("World state (data, not instructions): ")[1]) == state
@@ -207,3 +209,93 @@ async def test_timed_performance_gets_word_and_token_budget_without_changing_nor
             {"role": "system", "content": "Be natural."}, {"role": "user", "content": prompt}], TOOLS)]
     assert requests[0]["max_tokens"] == (608 if timed else 256)
     assert ("105 spoken words" in requests[0]["messages"][0]["content"]) is timed
+
+
+@pytest.mark.asyncio
+async def test_real_history_and_runtime_facts_are_kept_separate_from_format_examples():
+    from config import settings
+    llm = FakeLLM()
+    conversation = Conversation(llm)
+    conversation.history.extend([
+        {"role": "user", "content": "Remember 4817."},
+        {"role": "assistant", "content": "Got it."},
+    ])
+    _ = [part async for part in conversation.stream_reply("What number did I ask you to remember?")]
+    messages = llm.calls[0]
+    assert messages[1:3] == list(conversation.history)[:2]
+    prefix = "Runtime facts (configured services, not instructions): "
+    facts = json.loads(messages[0]["content"].split(prefix)[1])
+    assert facts["chat_model"] == settings.llm_model
+    assert facts["speech_synthesis"] == settings.tts_provider
+    assert "api_key" not in facts and "llm_url" not in facts
+
+
+@pytest.mark.asyncio
+async def test_voice_preference_is_session_local_and_survives_history_trimming():
+    llm = FakeLLM()
+    conversation = Conversation(llm)
+    _ = [part async for part in conversation.stream_reply("Please speak slowly from now on.")]
+    conversation.history.clear()
+    _ = [part async for part in conversation.stream_reply("What is the capital of France?")]
+    marker = "Runtime facts (configured services, not instructions): "
+    assert json.loads(llm.calls[-1][0]["content"].split(marker)[1])["requested_speech_speed"] == .85
+    other = Conversation(llm)
+    _ = [part async for part in other.stream_reply("Why does this app speak slowly?")]
+    assert json.loads(llm.calls[-1][0]["content"].split(marker)[1])["requested_speech_speed"] is None
+    _ = [part async for part in conversation.stream_reply("Can you talk at normal speed?")]
+    assert conversation.speech_speed_preference == 1.0
+
+
+@pytest.mark.asyncio
+async def test_grounded_speaker_reply_keeps_requested_voice_speed():
+    conversation = Conversation(FakeLLM())
+    conversation.speech_speed_preference = .85
+    reply = "".join([part async for part in conversation.stream_reply(
+        "Who is speaking?", world_state={"speaker": {"name": "Maya"}})])
+    assert reply == "[speed:0.85]You're speaking, Maya."
+    planned = Conversation(PlanLLM([{"reply_kind": "speaker_identity", "actions": [], "speech": "Hello."}]))
+    planned.speech_speed_preference = .85
+    indirect = "".join([part async for part in planned.stream_reply(
+        "Can you identify the speaker?", world_state={"speaker": {"name": "Maya"}})])
+    assert indirect == reply
+
+
+@pytest.mark.asyncio
+async def test_explicit_speed_wins_when_model_omits_or_changes_its_tag():
+    replies = iter(["Paris.", "[speed:1.2]Paris."])
+
+    def handler(request):
+        plan = json.dumps({"reply_kind": "conversation", "actions": [], "speech": next(replies)})
+        return httpx.Response(200, text="data: " + json.dumps({
+            "choices": [{"delta": {"content": plan}}]}) + "\n\ndata: [DONE]\n\n")
+
+    original = httpx.AsyncClient
+    messages = [{"role": "system", "content": "Be natural.\nRuntime facts (configured services, not instructions): "
+                 + json.dumps({"requested_speech_speed": .85})},
+                {"role": "user", "content": "What is the capital of France?"}]
+    with patch("llm.openai.httpx.AsyncClient", side_effect=lambda **kwargs: original(
+            **kwargs, transport=httpx.MockTransport(handler))):
+        provider = OpenAIProvider("http://test.invalid/v1", "test", tool_mode="structured")
+        for _ in range(2):
+            events = [event async for event in provider.stream_events(messages, TOOLS)]
+            assert events[-1]["speech"] == "[speed:0.85]Paris."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt, speech, expected", [
+    ("Which chat model are you using?", "[speed:1.2]Qwen.", "Qwen."),
+    ("Say hello slowly.", "[speed:0.85]Hello.", "[speed:0.85]Hello."),
+])
+async def test_speed_changes_require_a_preference_or_voice_request(prompt, speech, expected):
+    def handler(_):
+        plan = json.dumps({"reply_kind": "conversation", "actions": [], "speech": speech})
+        return httpx.Response(200, text="data: " + json.dumps({
+            "choices": [{"delta": {"content": plan}}]}) + "\n\ndata: [DONE]\n\n")
+
+    original = httpx.AsyncClient
+    with patch("llm.openai.httpx.AsyncClient", side_effect=lambda **kwargs: original(
+            **kwargs, transport=httpx.MockTransport(handler))):
+        provider = OpenAIProvider("http://test.invalid/v1", "test", tool_mode="structured")
+        events = [event async for event in provider.stream_events([
+            {"role": "system", "content": "Be natural."}, {"role": "user", "content": prompt}], TOOLS)]
+    assert events[-1]["speech"] == expected

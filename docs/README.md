@@ -12,6 +12,7 @@ Use one guide for each task:
 | [Audio and gesture synchronization](audio-gesture-synchronization.md) | Understand playback pacing and gesture alignment |
 | [Troubleshooting](troubleshooting.md) | Diagnose startup, device, and provider failures |
 | [Benchmarks](benchmarks/README.md) | Review recorded performance, reliability, source data, and calculation methods |
+| [Prompt evaluations](prompt-evaluation/README.md) | Inspect response quality, grounding, and voice-preference checks |
 | [Changelog](../CHANGELOG.md) | Review implemented changes and recorded validation |
 
 Component entry points: [backend](../backend/README.md),

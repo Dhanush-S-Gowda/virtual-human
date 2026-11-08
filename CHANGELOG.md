@@ -3,6 +3,36 @@
 Local change owner: **Bhvan Madhusudhan**. Upstream commits retain their original
 authorship. Entries describe implemented changes and the checks actually run.
 
+## 2026-11-08 - Prompt grounding and response quality
+
+Change owner: **Bhvan Madhusudhan**.
+
+### Changed
+
+- Reorganized the assistant prompt around direct answers, real conversation
+  memory, current camera evidence, supported expression, and honest runtime facts.
+- Removed fictional demonstration turns from structured model requests. Real
+  history stays intact, while the response schema supplies the output format.
+- Added configured model names and speed limits without exposing credentials
+  or provider URLs. Moved runtime facts beside the latest user request.
+- Stored common direct English speech preferences per conversation. Structured
+  replies retain an explicit user rate and drop unrequested speed changes;
+  performances can still vary speed.
+- Kept the prompt's allowed animation list synchronized with the catalog while
+  excluding automatic talking tags from suggested model output.
+
+### Validation and limits
+
+- Added a repeatable 15-scenario local Qwen comparison, with original/final
+  replies and development candidates under `docs/prompt-evaluation/`.
+- Basic application-level answer/control checks improved from 13/15 to 15/15
+  in one local-model comparison. This includes code/context changes and is not
+  an isolated prompt-wording experiment or a general accuracy score.
+- 337 backend tests and 7 subtests passed; 1 optional model-assets test skipped.
+  All 51 targeted checks also passed after the final speaker-rate adjustment.
+  Some unnecessary or semantically mismatched gesture tags remain in model
+  responses. Physical camera and TTS behavior were not part of this evaluation.
+
 ## 2026-11-08 - Recorded Qwen 4B benchmark report
 
 Change owner: **Bhvan Madhusudhan**.

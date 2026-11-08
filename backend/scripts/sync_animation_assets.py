@@ -28,9 +28,12 @@ def sync(root):
     (root / "TalkingHead/animation_catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
     prompt_path = root / "backend/llm/prompts/system.txt"
     prompt = prompt_path.read_text()
-    tags = ", ".join(f"[{item['tag']}]" for item in catalog)
-    prompt = re.sub(r"Put a tag immediately before its associated spoken phrase: .*?\.",
-                    "Put a tag immediately before its associated spoken phrase: " + tags + ".", prompt)
+    tags = ", ".join(f"[{item['tag']}]" for item in catalog if item["tag"] != "talking")
+    prompt, changed = re.subn(r"Allowed gesture tags: .*?\.",
+                              "Allowed gesture tags: " + tags + ".", prompt, count=1)
+    if not changed:
+        prompt = re.sub(r"Put a tag immediately before its associated spoken phrase: .*?\.",
+                        "Put a tag immediately before its associated spoken phrase: " + tags + ".", prompt)
     prompt = prompt.replace(" [greet] means wave.", "")
     prompt_path.write_text(prompt)
     return catalog

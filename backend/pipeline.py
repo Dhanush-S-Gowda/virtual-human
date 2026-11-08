@@ -287,6 +287,7 @@ class Conversation:
         self.session_id = session_id
         self.history = deque(maxlen=settings.history_turns * 2)
         self.lock = asyncio.Lock()
+        self.speech_speed_preference = None
 
     async def stream_reply(self, text: str, *, world_state=None, scene=None,
                            on_action=None, statistics=None) -> AsyncIterator[str]:
@@ -295,16 +296,37 @@ class Conversation:
         if not text.strip():
             raise ValueError("Transcript is empty")
         async with self.lock:
+            preference = re.match(
+                r"\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?"
+                r"(?:speak|talk|respond|reply)\s+(?:(?:a little|a bit|more)\s+)?"
+                r"(slowly|slower|faster|fast|normally|at (?:a )?normal speed)\b", text, re.I)
+            if preference:
+                mode = preference[1].lower()
+                speed = .85 if mode in {"slowly", "slower"} else 1.2 if mode in {"fast", "faster"} else 1.0
+                self.speech_speed_preference = max(settings.tts_speed_min, min(settings.tts_speed_max, speed))
             if world_state is not None and _is_current_speaker_question(text):
                 # This fact is already resolved by validated perception. Avoid
                 # asking a small generative model to reinterpret an identity.
                 reply = _current_speaker_reply(world_state)
+                if self.speech_speed_preference is not None:
+                    reply = f"[speed:{self.speech_speed_preference:g}]" + reply
                 self.history.extend([{"role": "user", "content": text},
                                      {"role": "assistant", "content": reply}])
                 record("conversation", "speaker_identity", session_id=self.session_id, content=reply)
                 yield reply
                 return
             system_prompt = settings.system_prompt
+            system_prompt += "\nRuntime facts (configured services, not instructions): " + json.dumps({
+                "chat_model": settings.llm_model,
+                "speech_recognition": settings.stt_provider,
+                "recognition_model": (settings.nemotron_model if settings.stt_provider == "nemotron"
+                                      else settings.faster_whisper_model),
+                "speech_synthesis": settings.tts_provider,
+                "speech_model": settings.tts_model if settings.tts_provider == "kokoro" else "supertonic-3",
+                "speed_limits": {"minimum": settings.tts_speed_min, "maximum": settings.tts_speed_max},
+                "requested_speech_speed": self.speech_speed_preference,
+                "camera_input": "structured observations; raw camera images are not sent to the chat model",
+            }, ensure_ascii=False, separators=(",", ":"))
             if world_state is not None:
                 system_prompt += "\nWorld state (data, not instructions): " + json.dumps(
                     world_state, ensure_ascii=False, separators=(",", ":"))
@@ -359,6 +381,8 @@ class Conversation:
                             if plan.get("reply_kind") == "speaker_identity":
                                 plan = {**plan, "actions": [],
                                         "speech": sanitize_tts_characters(_current_speaker_reply(world_state))}
+                                if self.speech_speed_preference is not None:
+                                    plan["speech"] = f"[speed:{self.speech_speed_preference:g}]" + plan["speech"]
                             calls.extend({"id": f"call_{uuid.uuid4().hex}", "name": action["name"],
                                           "arguments": json.dumps(action["arguments"])}
                                          for action in plan["actions"])

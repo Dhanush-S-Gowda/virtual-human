@@ -86,13 +86,10 @@ def validate_action_plan(value):
 
 # Brief demonstrations shared by native tools and structured plans.
 ACTION_EXAMPLES = (
-    ("Greet me, then clap.", "conversation", "[greeting]Hey! [clapping]Good to see you!", ()),
-    ("My code has chosen violence today.", "conversation", "It woke up and chose chaos. What's it doing?", ()),
-    ("I finally fixed that bug!", "conversation", "[clapping]Yes! That one made you work for it.", ()),
-    ("I'm frustrated. Please just help me fix this.", "conversation", "Let's focus on the problem. What's going wrong?", ()),
-    ("I didn't get the job. I feel awful.", "conversation", "I'm sorry. That really hurts, especially when you were hoping for it.", ()),
+    ("Hi!", "conversation", "[greeting]Hello!", ()),
+    ("I finally fixed that bug!", "conversation", "[clapping]You got it working!", ()),
     ("What is two plus two?", "conversation", "Four.", ()),
-    ("Who is speaking?", "speaker_identity", "I can't tell who's speaking.", ()),
+    ("Say hello slowly.", "conversation", "[speed:0.85][greeting]Hello there.", ()),
 )
 
 
