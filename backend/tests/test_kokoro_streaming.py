@@ -263,7 +263,7 @@ async def test_closing_stream_early_closes_http_response():
 
 def test_metrics_csv_schema_expands_without_losing_existing_rows(monkeypatch, tmp_path):
     metrics_file = tmp_path / "metrics.csv"
-    metrics_file.write_text("stt_provider,status\r\nnemotron,ok\r\n", encoding="utf-8")
+    metrics_file.write_text("stt_provider,status,historical_field\r\nnemotron,ok,keep-me\r\n", encoding="utf-8")
     monkeypatch.setattr(pipeline, "_METRICS_FILE", metrics_file)
     pipeline._append_metrics_csv({"status": "ok", "tts_segment_ms": [120.0],
                                   "kokoro_request_first_byte_ms": [1.5]})
@@ -271,6 +271,7 @@ def test_metrics_csv_schema_expands_without_losing_existing_rows(monkeypatch, tm
         rows = list(csv.DictReader(source))
     assert len(rows) == 2
     assert rows[0]["stt_provider"] == "nemotron"
+    assert rows[0]["historical_field"] == "keep-me"
     assert rows[0]["llm_gesture_parse_ms"] == ""
     assert rows[1]["status"] == "ok"
     assert rows[1]["tts_segment_ms_json"] == "[120.0]"

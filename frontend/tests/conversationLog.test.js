@@ -43,7 +43,7 @@ test("multiple turns retain all messages and replace only the initial placeholde
   log.finishReply();
   assert.equal(body.querySelector(".conversationEmpty"), null);
   assert.deepEqual(body.children.map((block) => block.children.map((child) => child.textContent)), [
-    ["You", "Hello"], ["Alex", "Hi"], ["You", "How are you?"], ["Alex", "Doing well"],
+    ["Unknown person", "Hello"], ["Alex", "Hi"], ["Unknown person", "How are you?"], ["Alex", "Doing well"],
   ]);
   assert.equal(body.scrollTop, body.scrollHeight);
 });

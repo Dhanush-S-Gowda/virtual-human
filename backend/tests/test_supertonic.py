@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import sys
 import unittest
+import tempfile
 from unittest.mock import patch
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -14,10 +15,21 @@ from tts.supertonic import SupertonicProvider, _approximate_word_timings, _resol
 
 class SupertonicProviderTests(unittest.TestCase):
     def test_frontend_voice_styles_resolve_without_yaml_selection(self):
-        self.assertEqual(_resolve_style("F1").name, "F1.json")
-        self.assertEqual(_resolve_style("M1").name, "M1.json")
-        with self.assertRaises(ValueError):
-            _resolve_style("af_heart")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            styles = root / "supertonic/assets/voice_styles"
+            styles.mkdir(parents=True)
+            for voice in ("F1", "M1"):
+                (styles / f"{voice}.json").write_text("{}")
+            with patch("tts.supertonic.BACKEND_DIR", root):
+                self.assertEqual(_resolve_style("F1").name, "F1.json")
+                self.assertEqual(_resolve_style("M1").name, "M1.json")
+                with self.assertRaises(ValueError):
+                    _resolve_style("af_heart")
+                (styles / "F1.json").unlink()
+                with self.assertRaises(FileNotFoundError):
+                    _resolve_style("F1")
+
 
     def test_word_timings_cover_duration_and_match_word_count(self):
         words, starts, durations = _approximate_word_timings("Hello, talking head!", 2.0)

@@ -8,3 +8,5 @@ soundfile>=0.12.1
 faster-whisper==1.2.1
 av>=11,<19
 uvicorn[standard]
+
+celery[redis]>=5.5,<6

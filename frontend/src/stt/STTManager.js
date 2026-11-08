@@ -12,7 +12,7 @@ export const STTState = {
 
 export class STTManager {
     constructor(options = {}) {
-        const endpoint = (options.endpoint || import.meta.env.VITE_BACKEND_URL || "http://localhost:8000").replace(/\/+$/, "");
+        const endpoint = new URL(options.endpoint || import.meta.env?.VITE_BACKEND_URL || "/api", globalThis.location?.origin || "http://localhost:5173").href.replace(/\/+$/, "");
         this.websocketUrl = endpoint.replace(/^http/, "ws") + "/ws";
         this.onStateChange = options.onStateChange || (() => {});
         this.onTranscript = options.onTranscript || (() => {});
@@ -50,6 +50,9 @@ export class STTManager {
         try {
             const startOptions = await this.getStartOptions();
             if (generation !== this.captureGeneration) return false;
+            // A previous release may still be waiting for its worklet flush.
+            // Release those resources before assigning the new capture stream.
+            if (this.captureNode || this.stream || this.audioContext) this._stopCapture();
             if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
                 this.socket.onclose = this.socket.onmessage = null;
                 if (this.socket.readyState === WebSocket.OPEN) {
@@ -158,6 +161,8 @@ export class STTManager {
             return false;
         }
         if (!this.isRecording()) return false;
+        const generation = this.captureGeneration;
+        const socket = this.socket;
         this.setState(STTState.TRANSCRIBING);
         try {
             await new Promise((resolve, reject) => {
@@ -165,16 +170,18 @@ export class STTManager {
                 this.captureNode.port.postMessage("stop");
                 this.flushTimer = setTimeout(() => reject(new Error("Audio capture did not stop.")), 2000);
             });
-            if (this.socket?.readyState !== WebSocket.OPEN) return false;
-            this.socket.send(JSON.stringify({ type: "end", ...this.getContext() }));
+            if (generation !== this.captureGeneration || this.socket !== socket) return false;
+            if (socket?.readyState !== WebSocket.OPEN) return false;
+            socket.send(JSON.stringify({ type: "end", ...this.getContext() }));
             return true;
         } catch (error) {
+            if (generation !== this.captureGeneration) return false;
             this.cancelRecording();
             this.setState(STTState.ERROR, error.message);
             this.onError(error.message);
             return false;
         } finally {
-            this._stopCapture();
+            if (generation === this.captureGeneration) this._stopCapture();
         }
     }
 

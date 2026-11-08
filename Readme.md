@@ -1,309 +1,244 @@
 # Virtual Human
 
 Virtual Human is a browser-based 3D companion with push-to-talk conversation,
-real-time speech playback, lip synchronization, expressive gestures, and optional
-camera understanding. The application is designed to run model inference on
-your own machine. Speech recognition, speech generation, chat, and vision can
-all use local models; hosted OpenAI-compatible endpoints are optional.
+speech playback, lip synchronization, expressive gestures, and optional camera
+understanding. The Docker demo uses local Ollama, Faster-Whisper, and Kokoro.
+Celery and Redis handle background metrics. **No sign-in is required; Keycloak
+and the authentication gateway have been removed.**
 
-> **Local-first note:** the currently checked-in `backend/config.yaml` selects
-> OpenRouter for chat and TTS and a Nemotron server at `127.0.0.1:18080` for
-> speech recognition. Follow [Run with local models](#run-with-local-models)
-> before starting the stack if you want all inference to stay local.
+## Start the Docker demo
 
-## System at a glance
+Use Docker Desktop with Linux containers and Compose 2.24 or newer. Initial
+setup needs an internet connection to download images and model weights.
+Run all commands below from the repository root.
+
+### NVIDIA GPU
+
+The root Compose entry includes `devops/compose.gpu.yaml` for NVIDIA
+acceleration in Ollama and Kokoro. Use this command on a machine with a
+supported NVIDIA GPU and Docker GPU access:
+
+```powershell
+docker compose up --build -d
+```
+
+### CPU only
+
+Specify only the base file to bypass the GPU override:
+
+```powershell
+docker compose -f devops/compose.yaml up --build -d
+```
+
+For CPU-only operation, keep `-f devops/compose.yaml` in subsequent Compose
+commands, including logs, rebuilds, and shutdown. CPU inference can be slower.
+
+Open **http://localhost:4173** once startup completes. Allow microphone access
+to speak and camera access to use visual context. Hold Space to record, then
+release it to submit your turn. The response audio plays automatically.
+
+The `ollama-init` and `speech-init` services download the required chat and
+speech recognition models before the API starts. An initializer that finishes
+with exit code 0 is normal. Check progress with:
+
+```powershell
+docker compose ps -a
+docker compose logs -f ollama-init speech-init backend cv worker
+```
+
+For the default GPU setup, Windows users can also run:
+
+```powershell
+.\devops\Start-VirtualHuman.ps1
+.\devops\Start-VirtualHuman.ps1 -Rebuild
+.\devops\Start-VirtualHuman.ps1 -Stop
+```
+
+Stop the stack with `docker compose down`. Named volumes are retained.
+`docker compose down -v` deletes volumes, including model caches and stored
+data; do not use it for a routine restart.
+
+See [Docker setup](docs/docker.md) for more operational details and
+[the changelog](CHANGELOG.md) for changes credited to **Bhvan Madhusudhan**.
+
+## Services and connections
 
 ```mermaid
 flowchart LR
-    Browser[Browser UI and microphone] -->|16 kHz PCM over WebSocket| API[FastAPI conversation API]
-    API -->|local model worker| FW[Faster-Whisper]
-    API -->|streaming chat API| LLM[Ollama or another OpenAI-compatible LLM]
-    API -->|local ONNX worker| ST[Supertonic]
-    API -->|captioned WAV segments| K[Kokoro service]
-    Browser -->|camera frames and audio activity| CV[Independent CV service]
-    API -->|scene and identity queries| CV
-    CV --> OBJ[YOLO object detection]
-    CV --> FACE[InsightFace identity]
-    CV --> POSE[MediaPipe pose, face, and hand landmarks]
-    API -->|ordered audio, word timing, gesture cues| Browser
-    Browser -->|visemes and animation| Avatar[TalkingHead 3D avatar]
+    Browser[Browser: avatar, microphone, camera] --> Web[Nginx: localhost:4173]
+    Web -->|/api and WebSocket| API[FastAPI conversation API]
+    Web -->|/cv WebSocket| CV[Camera inference service]
+    API --> STT[Faster-Whisper]
+    API --> LLM[Ollama]
+    API --> TTS[Kokoro]
+    API <-->|scene and identity context| CV
+    API --> CSV[CSV metrics]
+    API -->|quantitative metrics| Redis[Redis broker]
+    Redis --> Worker[Celery worker]
+    Worker --> DB[SQLite metrics]
 ```
 
-The browser owns microphone and camera capture, the 3D scene, and final audio
-playback. The FastAPI backend owns conversation sessions and the STT, LLM, and
-TTS pipeline. Camera inference runs in a separate process so it can load its
-own models and continue to update the scene while a conversation is in
-progress. Compose starts the browser, API, local Ollama endpoint, and local
-Kokoro service; the CV process is started separately.
-
-| Part | What it does | Default interface |
+| Service | Purpose | Docker access |
 |---|---|---|
-| `talking-avatar/` | Push-to-talk UI, camera capture, avatar rendering, audio decoding and playback | Vite dev: `http://localhost:5173`; Compose preview: `http://localhost:4173` |
-| `backend/main.py` | FastAPI application, session management, and WebSocket conversation pipeline | `http://localhost:8000`; WebSocket `/ws` |
-| Faster-Whisper | Optional in-process local STT model | Selected by `stt_provider: faster-whisper` |
-| Nemotron speech server | Optional external streaming STT WebSocket service | `nemotron_url` in `backend/config.yaml` |
-| Ollama or other LLM | Generates the reply and permitted actions | OpenAI-compatible `/v1` base URL |
-| Supertonic | Optional in-process local ONNX TTS model | Selected by `tts_provider: supertonic` |
-| Kokoro | Optional local HTTP TTS service or hosted OpenAI-compatible TTS | `/v1/audio/speech` |
-| `backend/cv/` | Object, face, and landmark inference; speaker/scene summaries | WebSocket `ws://localhost:8765` |
-| `TalkingHead/` | Avatar models and animation assets used by the browser | Static assets bundled with the frontend |
+| `talking-avatar` | Nginx, static UI, API and camera proxies | `127.0.0.1:4173` on the host |
+| `backend` | Conversation sessions, STT, LLM and TTS coordination | Internal port 8000; browser uses `/api` |
+| `cv` | YOLO, InsightFace and MediaPipe inference | Internal port 8765; browser uses `/cv` |
+| `ollama` | Local `qwen3.5:2b` chat model | Internal port 11434 |
+| `kokoro` | Local speech synthesis and word timing | Internal port 8880 |
+| `redis` | Celery broker and task results | Internal port 6379 |
+| `worker` | Save quantitative metrics to SQLite | No HTTP interface |
+| `ollama-init`, `speech-init` | Prepare models before API startup | One-time startup jobs |
 
-## Run with local models
+Only the frontend publishes a host port. API and camera connections use the
+same browser origin, including through an HTTPS tunnel. Camera preview runs
+in the browser; a visible preview alone does not confirm that CV inference is
+connected. In Compose, the CV service starts with the rest of the stack.
 
-This is the recommended development setup. Chat runs through Ollama, STT uses
-Faster-Whisper in the backend, and TTS uses Supertonic ONNX assets in a local
-worker. No hosted LLM, STT, or TTS key is required. The first setup downloads
-model files, so it needs network access and sufficient disk space; inference
-requests then run locally.
+## Configuration
 
-### Requirements
+| Run mode | Configuration | Apply changes |
+|---|---|---|
+| Docker | `backend/config.docker.yaml`, copied into the image as `config.yaml` | Rebuild and recreate the affected services |
+| Host development | `backend/config.yaml` | Restart the backend and, for camera settings, the CV process |
+| Frontend Docker build | Build arguments in `devops/compose.yaml` | Rebuild `talking-avatar` |
 
-- Docker Engine/Desktop with the Compose plugin.
-- [`uv`](https://docs.astral.sh/uv/) for Python dependency and model setup.
-- Node.js 20 or newer and npm for frontend development outside Compose.
-- A supported NVIDIA GPU/runtime for the bundled Ollama service. For CPU-only
-  operation, run Ollama on the host or adapt the Ollama Compose device
-  reservation for your machine; CPU inference is supported but slower.
-- Space for the selected models: Faster-Whisper, Supertonic, and the CV model
-  assets. The setup script downloads these assets; it does not bake them into
-  the backend image.
+Docker configuration is baked into the image. Editing `backend/config.yaml`
+on the host does not change a running Docker backend. After Docker settings
+change, run `docker compose up --build -d`. If you change `llm_model`, also
+change the model name in the `ollama-init` command in `devops/compose.yaml`;
+the initializer does not read the YAML model setting automatically.
 
-### 1. Create local environment settings
+The Docker defaults are:
 
-From the repository root:
+- Chat: Ollama `qwen3.5:2b`, structured JSON plans, and disabled thinking output.
+- Speech recognition: Faster-Whisper `base`, CPU, `int8`.
+- Speech synthesis: Kokoro, using CPU or the NVIDIA override.
+- Speech segments: 8-word minimum, 12-word maximum, one synthesis request at a time.
+- Camera inference: a separate CPU service with persistent model caches.
+- OpenObserve diagnostics: disabled in Compose.
 
-```bash
-cp backend/.env.example backend/.env
-```
+`backend/.env` is optional for Docker. Use it for provider credentials when
+selecting hosted services; keep it out of version control. Docker service
+names such as `ollama`, `kokoro`, and `cv` resolve inside the Compose network.
+Host processes must use reachable host addresses instead.
 
-The example file sets `LLM_API_KEY=not-needed` for local OpenAI-compatible
-servers and leaves `TTS_API_KEY` empty. Keep actual hosted API keys in
-`backend/.env`; do not commit that file. Docker Compose passes it to the API as
-environment variables, and the backend image excludes `.env` files from its
-build context.
+### Speech speed and timing
 
-### 2. Select local providers
-
-Edit the active values in `backend/config.yaml`. For the included Compose
-Ollama service plus local Faster-Whisper and Supertonic, use these values (leave
-unrelated CV and conversation settings as they are):
+Users can ask the avatar to speak slowly or faster. The model can emit inline
+tags such as `[speed:0.85]`, `[speed:1.2]`, and `[speed:1.0]`. The existing tag
+parser removes these tags before display and synthesis. It rejects invalid
+values and clips finite values to the configured limits:
 
 ```yaml
-llm_provider: openai
-llm_url: http://ollama:11434/v1
-llm_model: qwen3.5:2b
-llm_tool_mode: structured
-llm_extra_body: {}
-
-stt_provider: faster-whisper
-faster_whisper_model: base
-faster_whisper_device: cpu
-faster_whisper_compute_type: int8
-
-# Optional camera transcription streaming alternative: a separate Nemotron
-# service must be running. It is not bundled in this repository or Compose.
-# stt_provider: nemotron
-# nemotron_url: ws://host.docker.internal:18080/v1/audio/transcriptions/realtime
-
-# Local ONNX TTS; model assets are prepared by setup.sh.
-tts_provider: supertonic
-# tts_device: auto
-# tts_supertonic_steps: 2
+tts_speed: 1.0
+tts_speed_min: 0.75
+tts_speed_max: 1.5
+min_speech_segment_words: 8
+max_speech_segment_words: 12
+tts_max_concurrent_segments: 1
 ```
 
-`llm_extra_body: {}` removes hosted-provider-specific sampling fields from the
-checked-in configuration. `qwen3.5:2b` is an example Ollama model name; change
-it to a model available to your Ollama version. The Compose `ollama-init`
-service reads the active `llm_url` and `llm_model`, downloads the model if
-missing, and warms it before the API starts.
+Keep the speed limits within the provider range of 0.25 to 4.0. A tag applies
+to subsequent phrases. Persistence across turns depends on the model repeating
+the preference from conversation history.
 
-The Compose Ollama URL is `http://ollama:11434/v1` because containers use the
-Compose service name. If you run the API directly on the host and use a host
-Ollama service, use `http://localhost:11434/v1` instead.
+The Activity panel and metrics separate transcription, reply generation, and
+speech timing. First model loads take longer than warm requests. Short segments
+can reduce the wait for speech, but actual delay also depends on hardware,
+model size, provider timing, and gesture pacing. See
+[audio and gesture synchronization](docs/audio-gesture-synchronization.md).
 
-### 3. Prepare local models
+## Celery, Redis, and stored data
 
-Run the setup script from the repository root:
+Live speech uses the direct conversation pipeline. After a turn, the API writes
+CSV metrics and queues a quantitative summary. Celery stores that summary in
+SQLite. Event IDs prevent duplicate rows after task redelivery.
 
-```bash
-./backend/setup.sh
+Redis database 0 holds the broker queue; database 1 holds task results. Redis
+uses append-only persistence, and task results expire after one hour. Broker
+and result-store failures use short timeouts so an outage does not hold up turn
+completion. A failed queue submission is logged; the CSV remains the fallback.
+
+Queued metrics exclude transcripts and camera payloads. **CSV metrics include
+spoken response segments** in `response_segments_json` as well as timing data.
+
+| Named volume | Stored data |
+|---|---|
+| `backend-data` | `/app/data/metrics.csv` and `/app/data/metrics.sqlite3` |
+| `redis-data` | Redis queue and result persistence |
+| `ollama-models` | Ollama model weights |
+| `whisper-models` | Faster-Whisper cache |
+| `cv-models`, `yolo-models` | Camera model caches |
+| `cv-data` | Camera identity database and related data |
+
+Check background services with:
+
+```powershell
+docker compose exec redis redis-cli ping
+docker compose exec worker celery -A background.celery_app inspect ping
+docker compose logs --tail 50 worker
 ```
 
-On Windows, run `./backend/setup.ps1` in PowerShell. Both scripts check the
-backend environment offline before offering to install missing dependencies.
-They then use the same model setup helper. Existing assets are reported as
-already downloaded. Each missing model or image requires an explicit `Y`;
-Enter, `N`, and closed input skip it. Faster-Whisper and Supertonic assets are
-optional even when another provider is selected.
+## Host development
 
-Faster-Whisper uses the configured model cache. Supertonic uses
-`backend/supertonic/assets`. CV assets use the same paths as their runtime
-providers. Run setup again after changing a model selection or to install
-previously skipped assets. A selected provider still needs its assets before
-the application can use it.
+Use Docker for the ready-to-run local demo. Host development additionally
+requires Python 3.13 or newer, `uv`, Node.js 22.12 or newer, npm, and any native
+libraries required by the model packages.
 
-For Kokoro, setup detects NVIDIA GPUs with `nvidia-smi`, with a CUDA availability
-check as a fallback. It selects `ghcr.io/remsky/kokoro-fastapi-gpu:v0.9.2` when
-available and `ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2` otherwise. Intel and AMD
-GPUs do not select the CUDA image. A missing image is pulled only after `Y`;
-an existing image is reused. The script prints the matching `docker run`
-command, including `--gpus all` for GPU. GPU containers need a configured NVIDIA
-container runtime. Compose uses the image/runtime settings in `docker-compose.yml`.
+The checked-in host configuration differs from Docker: it selects OpenRouter
+for chat, Nemotron at `127.0.0.1:18080` for STT, and Kokoro at
+`localhost:8880` for TTS. Configure those services and credentials, or change
+`backend/config.yaml` to your local providers before starting the API.
 
-### 4. Start the application
+For local inference, select `stt_provider: faster-whisper`, an accessible
+Ollama URL and model, and either a running Kokoro service or
+`tts_provider: supertonic`. Prepare local models from the repository root:
 
-```bash
-docker compose up --build
+```powershell
+.\backend\setup.ps1
 ```
 
-Wait until the services report healthy, then open
-[http://localhost:4173](http://localhost:4173). Hold **Space** to speak and
-release it to submit the utterance. Use the on-screen controls to stop playback
-or cancel a recording.
+On Linux, use `bash backend/setup.sh`. These scripts request confirmation for
+missing dependencies and model downloads. They do not start external Ollama,
+Kokoro, or Nemotron services. Compose services are internal-only by default;
+a host backend cannot reach them through `localhost` without separate port
+configuration.
 
-Compose currently reserves an NVIDIA device for its Ollama service. If your
-machine has no NVIDIA Docker runtime, either run a supported local LLM server
-on the host and run the API/frontend directly, or adjust that reservation for
-your environment. The model providers and app settings are independent of
-Docker; Compose is one deployment option.
+Start the backend from its directory:
 
-For a host-native setup, start Ollama on the host and set
-`llm_url: http://localhost:11434/v1`. Keep `stt_provider: faster-whisper` and
-`tts_provider: supertonic`; then run the API and frontend in separate
-terminals. Pull the configured chat model once if needed:
-
-```bash
-ollama pull qwen3.5:2b
-```
-
-Then start the API and frontend:
-
-```bash
+```powershell
 cd backend
-uv run main.py
+uv sync --extra dev
+uv run python main.py
 ```
 
-```bash
-cd talking-avatar
-npm install
-npm run dev
-```
+Start CV in a separate terminal from the repository root:
 
-Open `http://localhost:5173`. This path avoids the Compose Ollama GPU
-reservation; the selected local models can still run on CPU, subject to their
-latency and memory requirements.
-
-Stop the stack with:
-
-```bash
-docker compose down
-```
-
-The Ollama model persists in the `ollama-models` Docker volume. Faster-Whisper
-and Supertonic assets persist in repository directories mounted into the
-backend container. The metrics file persists at
-`backend/metrics-data/metrics.csv` for Compose runs.
-
-## Run the camera/CV service
-
-The CV service is intentionally separate from the Compose stack. Prepare the
-models with `./backend/setup.sh`, then start it from the repository root in a
-second terminal:
-
-```bash
+```powershell
 uv run --project backend python -m backend.cv
 ```
 
-It serves the browser camera adapter at `ws://localhost:8765`. The browser
-streams camera frames and microphone activity; the service reports detected
-objects, people, face identities, and gesture/lip-motion observations. The
-conversation backend requests a compact current-scene snapshot and uses it as
-context. Without the CV service, speech conversation still works; scene and
-speaker context are reported as unavailable.
+Start the frontend in another terminal:
 
-The default `cv_adapter_url: ws://localhost:8765` is correct when the API runs
-on the host. When the API runs in Compose and the CV service runs on the host,
-set `cv_adapter_url: ws://host.docker.internal:8765`; the browser's camera URL
-remains `ws://localhost:8765` because the browser runs on the host.
-
-CV uses local YOLO object detection, MediaPipe landmarks, and InsightFace
-recognition. Each model provider runs in its own managed process with bounded
-queues and configured CPU/thread allocation. Identity enrollment requires
-consent by default. Names are stored in the SQLite database configured by
-`cv.identity.database_path` (`backend/data/identities.db` by default). The
-computer vision packages and models are independent of the main speech UI;
-check model readiness without opening a camera with:
-
-```bash
-uv run --project backend python -m backend.cv --check-env
+```powershell
+cd frontend
+npm ci
+npm run dev
 ```
 
-## Local inference choices
+Open http://localhost:5173. Vite proxies `/api` to the host backend on port
+8000 and `/cv` to the CV service on port 8765. `npm run build` creates the
+frontend bundle. Docker serves its bundle with Nginx on port 4173.
 
-### Speech recognition
-
-**Faster-Whisper** is the fully local default choice for STT when selected. The
-backend loads the configured CTranslate2 model once and reuses it for each
-recording. `faster_whisper_model`, `faster_whisper_device`,
-`faster_whisper_compute_type`, and `faster_whisper_download_root` select the
-model and runtime. The repository defaults are `base`, `cpu`, `int8`, and
-`.cache/faster-whisper`. The setup script offers to download the model before startup;
-the API does not fetch it during ordinary transcription.
-
-The **Nemotron** adapter streams 16-bit PCM chunks to a separate WebSocket
-server while the user speaks. Partial text can appear in the UI during capture;
-only the server's completed transcript is submitted to the LLM. Nemotron
-inference is not hosted by this app. Start the compatible server yourself and
-point `nemotron_url` to it. In Compose, `127.0.0.1` means the backend
-container, so use `host.docker.internal` to reach a service on the host.
-
-### Language model
-
-The application calls the OpenAI-compatible Chat Completions API using
-`llm_url`, `llm_model`, and `LLM_API_KEY`. Local Ollama is the recommended
-configuration for offline/private inference. Other local servers that expose
-an OpenAI-compatible endpoint can be used by changing these settings.
-
-`llm_tool_mode: native` streams normal text with inline gesture tags and native
-name tool calls. The selected model and server must support native tool calls.
-Each turn receives a fresh CV snapshot with people, recognized names, object
-counts, and configurable recent visual history. Expired current observations
-are unavailable; retained windows can still describe past activity.
-The prompt and tool definition are in
-`backend/llm/prompts/system.txt` and `backend/llm/tools.py`.
-
-### Speech synthesis
-
-**Supertonic 3** runs locally using ONNX Runtime. It loads the model and voice
-styles into a dedicated worker, chooses an available supported accelerator
-when `tts_device: auto`, and falls back to CPU. `tts_supertonic_steps` trades
-inference work for quality/speed. `F1` and `M1` are the available voice styles.
-
-**Kokoro** uses the Kokoro-FastAPI captioned-speech API. Configure its service root:
-
-```yaml
-tts_provider: kokoro
-tts_model: kokoro
-tts_url: http://localhost:8880
-```
-
-Compose sets `TTS_URL=http://kokoro:8880` for the backend container. The
-`TTS_URL` environment variable overrides `tts_url`. The client calls
-`/dev/captioned_speech` with WAV output and word timestamps enabled. It buffers
-each short speech segment until audio and timestamps are available, then sends
-them together. This increases first-audio latency compared with raw PCM streaming.
-Missing or invalid timestamps fail synthesis; the client does not estimate them.
-An OpenAI-compatible speech endpoint alone does not supply this API.
-See the [Kokoro-FastAPI captions documentation](https://github.com/remsky/Kokoro-FastAPI#captions).
-
-The frontend offers provider-specific voices. Current choices are `am_puck`
-and `af_heart` for Kokoro and `F1` and `M1` for Supertonic. A hosted model may
-support a different voice set; change the choices in `backend/tts/voices.py`
-when integrating one.
+Celery is disabled by default outside Compose. A host deployment must provide
+Redis and set `CELERY_ENABLED`, `CELERY_BROKER_URL`, and
+`CELERY_RESULT_BACKEND` for the API, plus matching worker settings. Host CSV
+metrics normally use `backend/metrics.csv`; Docker uses the named volume above.
 
 ## How a conversation flows
 
-1. The browser opens `WS /ws`, captures mono audio as 16 kHz PCM, and sends
+1. The browser opens `/api/ws` through the app proxy, captures mono PCM at
+   the AudioContext sample rate (usually 16 kHz), and sends
    chunks while Space is held.
 2. On release, the backend finalizes transcription. Streaming-capable STT can
    send partial transcript updates while capture is active; final text is sent
@@ -314,10 +249,11 @@ when integrating one.
 4. The backend removes recognized inline gesture tags, accumulates spoken text
    at natural boundaries, and queues TTS segments. It prefers a complete
    sentence after `min_speech_segment_words`; it forces a split at
-   `max_speech_segment_words` when needed. The checked-in values are 15 and 25
-   words.
-5. In the configured `native` LLM mode, text can reach TTS while later text
-   is still being generated. Each Kokoro segment waits for its matching audio
+   `max_speech_segment_words` when needed. Docker uses 8 and 12 words; host development uses
+   the values in `backend/config.yaml`.
+5. In `native` LLM mode, text can reach TTS while later text
+   is still being generated. Docker uses `structured` mode, which validates
+   a JSON plan before speech generation. Each Kokoro segment waits for its matching audio
    and provider timestamps before delivery.
    Audio requests are sent in segment and chunk order. Each segment queue is
    bounded so a slow client cannot accumulate unlimited audio in memory.
@@ -353,8 +289,8 @@ The Web Audio clock drives the mixer, with 100 ms transitions between gestures.
 Stop clears active gestures and pending pacing. Frame scheduling and provider
 alignment accuracy still limit synchronization precision.
 
-Set these values in `backend/config.yaml`, restart the backend, and reload the
-browser:
+Set these values in the active configuration file. Rebuild the backend image
+for Docker, or restart the backend for host development, then reload the browser:
 
 ```yaml
 gesture_min_duration_seconds: 2.0
@@ -446,12 +382,12 @@ flowchart LR
 
     subgraph Services[Separate inference services]
         OLLAMA[Ollama process/container\nlocal LLM weights]
-        KOKORO[Kokoro service process/container\nlocal CPU weights, if selected]
+        KOKORO[Kokoro service process/container\nlocal CPU or GPU weights, if selected]
         HOSTED[Optional hosted OpenAI-compatible APIs]
     end
 
-    UI <-->|conversation WebSocket :8000| LOOP
-    UI <-->|camera WebSocket :8765| CVLOOP
+    UI <-->|conversation WebSocket via /api/ws| LOOP
+    UI <-->|camera WebSocket via /cv| CVLOOP
     LOOP <-->|scene/identity WebSocket| CVLOOP
     LOOP <-->|HTTP chat stream| OLLAMA
     LOOP <-->|captioned WAV segments| KOKORO
@@ -501,7 +437,8 @@ model, and API key.
 
 Kokoro follows the same service boundary. The backend asynchronously requests
 `/dev/captioned_speech` and consumes WAV audio with word timestamps. With the Compose Kokoro service, the
-model runs in its own CPU container. With a hosted speech endpoint, inference
+model runs in its own container, using CPU in the base configuration or GPU
+with the NVIDIA override. With a hosted speech endpoint, inference
 runs remotely. In either case, the backend owns request ordering, queueing,
 conversion to independently playable packets, gesture timing, and delivery to
 the browser. Kokoro uses an async request semaphore, so up to
@@ -666,7 +603,7 @@ sequenceDiagram
         CAM-->>UI: overlays, identity and gesture observations
     end
 
-    UI->>WS: start(session, 16 kHz PCM)
+    UI->>WS: start(session, PCM capture sample rate)
     loop User holds Space
         UI->>WS: binary PCM chunk
         WS->>STT: forward PCM if STT is streaming
@@ -741,52 +678,18 @@ When CV is unavailable, that action fails safely and speech can continue.
 The source path for the turn coordinator is [`backend/pipeline.py`](backend/pipeline.py);
 the bounded CV request and speaker validation are in
 [`backend/world.py`](backend/world.py). Browser capture and camera event
-handling are in [`talking-avatar/src/main.js`](talking-avatar/src/main.js),
+handling are in [`frontend/src/main.js`](frontend/src/main.js),
 while microphone to speaker evidence matching is in
-[`talking-avatar/src/cv/speakingEvents.js`](talking-avatar/src/cv/speakingEvents.js).
-
-## Configuration reference
-
-`backend/config.yaml` is the main runtime configuration. It is mounted read-only
-in Compose, so edit it on the host and restart the backend to apply changes.
-`backend/config.py` loads it and reads `LLM_API_KEY` and `TTS_API_KEY` from the
-process environment (and from `backend/.env` for direct host runs).
-
-| Setting | Purpose | Example/local value |
-|---|---|---|
-| `llm_url`, `llm_model` | OpenAI-compatible chat base URL and model ID | Compose Ollama: `http://ollama:11434/v1`, `qwen3.5:2b` |
-| `stt_provider` | `faster-whisper` or `nemotron` | `faster-whisper` for fully local STT |
-| `faster_whisper_*` | Local model, device, quantization, and cache directory | `base`, `cpu`, `int8`, `.cache/faster-whisper` |
-| `nemotron_url` | External streaming STT WebSocket URL | Host from Compose: `ws://host.docker.internal:18080/...` |
-| `tts_provider` | `supertonic` or `kokoro` | `supertonic` for local ONNX TTS |
-| `tts_model`, `tts_url` | Kokoro/OpenAI-compatible speech model and service base URL | Local: `kokoro`, `http://kokoro:8880` |
-| `TTS_API_KEY` | Optional Bearer token for hosted TTS | Empty for local Kokoro |
-| `LLM_API_KEY` | Bearer token for the selected chat endpoint | `not-needed` for local Ollama |
-| `min_speech_segment_words`, `max_speech_segment_words` | Natural-boundary and hard word limits for TTS requests | `15`, `25` |
-| `tts_max_concurrent_segments` | Maximum parallel TTS segment requests | `2` |
-| `gesture_min_duration_seconds` | Minimum gesture duration; longer clips keep their natural duration | `2.0` |
-| `tts_volume_gain` | Browser TTS amplitude multiplier; 0 mutes, 1 preserves source volume | `1.5` |
-| `cv_adapter_url` | Backend-to-CV WebSocket address | `ws://host.docker.internal:8765` from Compose |
-| `max_audio_bytes`, `history_turns` | Input audio limit and retained conversation history | `10000000`, `8` |
-
-Use `backend/.env.example` as the starting point for secrets. The local Kokoro
-key default is the empty string, which sends no Authorization header. Local
-Ollama can use `LLM_API_KEY=not-needed`; hosted providers require their own
-key. Keep provider base URLs in `config.yaml` and secrets in `.env`.
+[`frontend/src/cv/speakingEvents.js`](frontend/src/cv/speakingEvents.js).
 
 ## Interfaces
 
-### Health check
+The Docker health endpoint is http://localhost:4173/api/health. Host development
+also exposes `http://localhost:8000/health`. This checks that the API responds
+and reports provider settings; it does not verify successful model inference.
 
-`GET /health` confirms that the API process is responding and reports configured
-provider/model names and available voices. It is a process health check; it does
-not prove that a remote model endpoint is reachable or that a local model has
-completed inference successfully.
-
-### Conversation WebSocket
-
-The browser connects to `ws://localhost:8000/ws`. A client starts a turn with a
-JSON text message similar to:
+The browser uses `/api/ws` for conversations. A direct host API client uses
+`ws://localhost:8000/ws`. Start a turn with a JSON message such as:
 
 ```json
 {
@@ -799,118 +702,86 @@ JSON text message similar to:
 }
 ```
 
-It then sends binary audio chunks and finishes with `{"type":"end"}`. The
-backend also accepts `{"type":"cancel"}`. Main server events include
-`transcript_partial`, `transcript`, `llm_delta`, `llm_complete`, `speech`,
-`metrics`, `error`, and `done`. Exact audio payloads include base64 audio,
-encoding, sample rate, word timing, segment/chunk indices, gesture cues, and
-provider timing quality for Kokoro.
+Send the actual capture sample rate, then binary audio chunks and
+`{"type":"end"}`. Cancel with `{"type":"cancel"}`. Events include `transcript`,
+`llm_delta`, `llm_complete`, `speech`, `metrics`, `error`, and `done`;
+partial transcripts depend on the selected STT provider. Speech packets carry
+audio, timing, segment identifiers, and gesture cues.
 
 For direct synthesis, send a `start` message with `mode: "speak"` and a `text`
-value. The backend returns speech packets, metrics, and `done` without STT or
-LLM processing; it still uses the selected TTS provider.
+value. This bypasses STT and LLM processing and uses the selected TTS provider.
 
-## Metrics and diagnostics
+## Verification
 
-In host development, turn summaries are written to `backend/metrics.csv`. In
-Compose they are written to the host-mounted
-`backend/metrics-data/metrics.csv`. The compact CSV records model names,
-recording and release-to-transcript time, transcript-to-reply time, LLM first
-token and gesture parsing time, gesture assignment/alignment costs, TTS queue
-and provider first-PCM/total times, release-to-first-audio time, total turn
-time, audio size, segment count, ordered `response_segments_json`, chunk count,
-rejected gesture count, and status. The JSON array preserves each exact spoken
-segment for inspection.
+From the repository root:
 
-`diagnostics_enabled` controls structured traces. When enabled, the backend can
-send traces and resource/process observations to OpenObserve using
-`OPENOBSERVE_URL`, `OPENOBSERVE_ORG`, `OPENOBSERVE_USER`, and
-`OPENOBSERVE_PASSWORD` (or `OPENOBSERVE_TOKEN`). OpenObserve is optional; if it
-is missing or unconfigured, core speech and conversation behavior continues.
-
-Useful log commands:
-
-```bash
-docker compose logs -f backend
-docker compose logs -f kokoro ollama
-```
-
-## Development
-
-### Backend
-
-```bash
-cd backend
-uv sync --extra dev
-uv run python main.py
-```
-
-The API reads `config.yaml` and `.env` from the backend directory. If you use
-host-local services, configure their host URLs (for example
-`http://localhost:8880` for Kokoro). Direct API startup listens on the configured
-`host` and `port` (defaults `0.0.0.0:8000`).
-
-### Frontend
-
-```bash
-cd talking-avatar
-npm install
-npm run dev
-```
-
-Vite serves the development build on port 5173 and proxies the legacy `/api`
-paths to the backend. The production preview used by Compose is on port 4173.
-To produce a production bundle, run `npm run build`.
-
-### Tests
-
-```bash
-# Backend; from the repository root
+```powershell
+node --test frontend/tests/*.test.js
 uv run --project backend --extra dev python -m pytest -c backend/pyproject.toml backend/tests -q
-
-# Frontend unit tests; from the repository root
-node --test talking-avatar/tests/*.test.js
 ```
 
-The frontend package has no `test` npm script; its tests use Node's built-in
-test runner. Tests that need models or cameras use fakes/fixtures unless
-explicitly described as live integration checks.
+To run backend tests with Docker instead of the host environment:
+
+```powershell
+docker compose run --rm --no-deps -v "${PWD}/backend/tests:/app/backend/tests:ro" backend uv run --no-sync --with pytest --with pytest-asyncio python -m pytest tests -q
+```
+
+Validate the Compose configuration with `docker compose config --quiet`.
+For CPU-only testing, include `-f devops/compose.yaml`. Tests that require
+optional model assets may be skipped when those assets are unavailable.
+See [CHANGELOG.md](CHANGELOG.md) for recorded checks and their limits.
+
+For a manual smoke check, open the app, verify `/api/health`, record a short
+phrase, and confirm that a reply and speech arrive. Check camera preview and
+CV status separately. Redis ping and Celery worker ping should both succeed.
 
 ## Troubleshooting
 
-| Symptom | Check |
+| Symptom | Check or action |
 |---|---|
-| Backend cannot reach Ollama | Use `http://ollama:11434/v1` from Compose or `http://localhost:11434/v1` from the host; check `ollama` health and the selected model. |
-| Hosted API returns 401 | Check `LLM_API_KEY` or `TTS_API_KEY` in `backend/.env`, then recreate/restart the backend container. Do not put keys in YAML. |
-| TTS returns 404 | Set `tts_url` to the API base ending at the service root or `/v1`, not the full speech route. The client appends the correct route. |
-| Kokoro voice rejected | Use a voice supported by the chosen model. The UI currently offers the local Kokoro choices; hosted models may need voice options changed in `backend/tts/voices.py`. |
-| Nemotron connection refused | Start the external server and check its WebSocket path. In Compose, use `host.docker.internal` to reach a host service. |
-| Camera/scene context unavailable | Start `uv run --project backend python -m backend.cv`, confirm `cv_adapter_url`, and check that the browser can reach `ws://localhost:8765`. |
-| Faster-Whisper model missing | Run `./backend/setup.sh` after setting the desired `faster_whisper_model`. |
-| Supertonic assets missing | Run `./backend/setup.sh`; confirm `backend/supertonic/assets/onnx` and `voice_styles` exist before starting. |
-| Audio arrives late | Check `metrics.csv` for release-to-transcript, transcript-to-reply, Kokoro first PCM, release-to-first-audio, and `response_segments_json`. Longer synthesis segments and CPU contention increase latency. |
-| Compose reports unavailable NVIDIA device | The bundled Ollama service requests an NVIDIA device. Use a working NVIDIA container runtime, run a host LLM/backend setup, or adapt the Ollama service for CPU inference. |
+| GPU reservation or driver error | Verify Docker GPU access, or use the CPU-only Compose command. |
+| Startup appears stuck | Read `ollama-init`, `speech-init`, and model service logs. First startup downloads weights. |
+| Port 4173 is in use | Stop the conflicting listener or change the frontend host port in Compose. |
+| An old sign-in page appears | Open the app root at `http://localhost:4173`, rather than an old `/oauth2/callback` URL. Rebuild the current stack if needed. |
+| Camera preview works but scene context is missing | Check the `cv` service logs and browser `/cv` connection. Preview and inference have separate status. |
+| Microphone or camera access fails | Allow browser permissions, check other apps using the device, and use localhost or an HTTPS origin. |
+| Speech takes too long | Compare transcription, LLM, and first-audio timings. Check GPU use, cold model loads, and CPU contention before changing segment settings. |
+| `/think` appears in text | Confirm the Docker configuration and model are current, then rebuild. Docker uses structured plans and stop markers for thinking controls. |
+| A conversation fails | Check `docker compose logs --tail 100 backend ollama kokoro` for the provider error. |
+| SQLite metrics are missing | Check Redis and worker ping, then worker logs. CSV may still contain the turn if queue submission failed. |
+| A config edit has no effect | Use `config.docker.yaml` and rebuild for Docker; use `config.yaml` and restart for host development. |
 
 ## Repository map
 
 ```text
-backend/
-  config.py, config.yaml       Settings and provider selection
-  main.py, pipeline.py         FastAPI app and conversation/audio pipeline
-  stt/                         Faster-Whisper and Nemotron adapters
-  llm/                         OpenAI-compatible streaming client and action plans
-  tts/                         Kokoro, Supertonic, voices, audio normalization
-  cv/                          Independent object/face/landmark service
-  scripts/                     Model setup, environment checks, diagnostics
-  tests/                       Backend and CV regression tests
-  supertonic/                  Pinned ONNX model runtime/assets location
-talking-avatar/
-  src/stt/                     Microphone capture and WebSocket client
-  src/avatar/                  Audio decoding, avatar and gesture playback
-  src/cv/                      Camera stream and perception overlays
-  src/ui/                      Settings, conversation log, responsive UI
-  tests/                       Node built-in frontend tests
-TalkingHead/                   3D avatar models, animation catalog and assets
-docker-compose.yml             Local service orchestration
-Start-VirtualHuman.ps1          Windows Compose start/stop helper
+virtual-human/
+|-- backend/                 API, model providers, CV, and Python tests
+|-- frontend/                Browser application, assets, and JavaScript tests
+|-- devops/                  Compose services, Dockerfiles, Nginx, and launcher
+|-- docs/                    Deployment and implementation guides
+|-- TalkingHead/             Shared avatar assets and animation catalog
+|-- docker-compose.yml       Root entry for the GPU demo
+|-- Readme.md
+`-- CHANGELOG.md
 ```
+
+Deployment files use the repository root as their Docker build context.
+The root Compose entry merges the base and GPU files from `devops/`.
+The Compose service name `talking-avatar` stays the same; its source is now
+in `frontend/`.
+
+| Path | Purpose |
+|---|---|
+| `backend/main.py`, `backend/pipeline.py` | API and conversation orchestration |
+| `backend/config.yaml`, `backend/config.docker.yaml` | Host and Docker settings |
+| `backend/background.py` | Celery metrics tasks and SQLite persistence |
+| `backend/inline_gestures.py` | Inline gesture and speed parsing |
+| `backend/stt/`, `backend/tts/`, `backend/llm/` | Provider adapters and prompts |
+| `backend/cv/`, `backend/runtime.py` | Vision inference and model workers |
+| `frontend/src/`, `TalkingHead/` | Browser application, avatar engine, assets |
+| `devops/nginx.conf` | Static serving and API/CV routing |
+| `backend/tests/`, `frontend/tests/` | Regression and unit tests |
+| `devops/compose.yaml`, `devops/compose.gpu.yaml` | Base CPU stack and NVIDIA override |
+| [Docker setup](docs/docker.md) | Deployment and operational checks |
+| [Audio and gesture synchronization](docs/audio-gesture-synchronization.md) | Playback timing and gesture implementation |
+| [Changelog](CHANGELOG.md) | Local changes and validation credited to Bhvan Madhusudhan |

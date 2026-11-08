@@ -109,3 +109,65 @@ async def test_health_exposes_configurable_playback_settings(monkeypatch):
         response = await client.get("/health")
     assert response.status_code == 200
     assert response.json()["playback"] == {"gesture_min_duration_seconds": .75, "tts_volume_gain": 2.0}
+
+
+@pytest.mark.parametrize("value, expected", [("0.1", .75), ("9", 1.5), ("1.2", 1.2), ("-3", .75)])
+def test_inline_speed_is_clipped_and_hidden(value, expected):
+    parser = InlineGestures(speed_min=.75, speed_max=1.5)
+    text = parser.feed("[speed:" + value + "][greeting]Hi.")
+    assert text == "Hi."
+    assert list(parser.speed_segments(text, 0)) == [("Hi.", 0, expected)]
+    assert parser.cues == [Cue(0, "greeting")]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "fast", "1.2.3", ""])
+def test_invalid_speed_is_rejected_without_changing_rate(value):
+    parser = InlineGestures()
+    assert parser.feed("[speed:" + value + "]Hi.") == "Hi."
+    assert parser.speed_changes == [(0, 1.0)]
+    assert parser.rejected == 1
+
+
+def test_chunked_speed_changes_keep_phrase_and_gesture_offsets():
+    parser = InlineGestures()
+    text = "".join(parser.feed(chunk) for chunk in ["[spe", "ed:0.8]Slow. ", "[speed:1.", "4][clapping]Fast."])
+    assert text == "Slow. Fast."
+    assert list(parser.speed_segments(text, 0)) == [("Slow.", 0, .8), ("Fast.", 6, 1.4)]
+    assert take_segment_cues(parser, 0, "Slow.") == []
+    assert take_segment_cues(parser, 6, "Fast.") == [Cue(0, "clapping")]
+
+
+@pytest.mark.asyncio
+async def test_inline_speed_reaches_tts_per_phrase(monkeypatch):
+    class SpeedLLM(FakeLLM):
+        async def stream_chat(self, messages):
+            for chunk in ["[speed:0.", "1][greeting]Slow. [speed:9]Fast."]:
+                yield chunk
+    rates = []
+    class SpeedTTS(FakeTTS):
+        async def synthesize_segment(self, text, voice, speed):
+            rates.append((text, speed))
+            return await super().synthesize_segment(text, voice, speed)
+    monkeypatch.setattr(pipeline, "current_world", AsyncMock(return_value=({"speaker": None}, {})))
+    app = SimpleNamespace(state=SimpleNamespace(providers=SimpleNamespace(
+        llm=SpeedLLM(), stt=FakeSTT(), tts=SpeedTTS()), conversations=OrderedDict()))
+    socket = FakeWebSocket(app, {"type": "start", "session_id": "speed-test", "voice": "af_heart"}, [
+        {"type": "websocket.receive", "bytes": b"sample"},
+        {"type": "websocket.receive", "text": '{"type":"end"}'}])
+    await asyncio.wait_for(pipeline.handle_websocket(socket), 3)
+    assert rates == [("Slow.", .75), ("Fast.", 1.5)]
+    assert "".join(event["text"] for event in socket.events if event["type"] == "llm_delta") == "Slow. Fast."
+
+
+@pytest.mark.parametrize("limits", [(float("nan"), 1.5), (1.5, .75), (.1, 1.5), (.75, 9)])
+def test_invalid_speed_limits_are_rejected(limits):
+    with pytest.raises(ValueError):
+        InlineGestures(speed_min=limits[0], speed_max=limits[1])
+
+
+def test_speed_tag_count_is_bounded_and_unclosed_tag_is_not_spoken():
+    parser = InlineGestures()
+    assert parser.feed("[speed:1.2]" * 1000 + "Hi.[speed:0.8") == "Hi."
+    parser.finish()
+    assert len(parser.speed_changes) == 64
+    assert parser.rejected > 0

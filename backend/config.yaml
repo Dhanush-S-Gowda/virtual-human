@@ -61,6 +61,9 @@ tts_sample_rate: 24000
 
 # Shared speech rate
 tts_speed: 1.0
+# Inline [speed:VALUE] multiplier limits (provider-supported range: 0.25 to 4).
+tts_speed_min: 0.75
+tts_speed_max: 1.5
 # Browser speech amplitude multiplier (1.0 = original volume).
 tts_volume_gain: 1.5
 # Each tagged gesture gets at least this long; longer clips finish naturally.

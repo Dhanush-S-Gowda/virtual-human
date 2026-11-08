@@ -1,0 +1,177 @@
+# Docker defaults. Host configuration remains in config.yaml.
+# API listener
+host: 0.0.0.0
+port: 8000
+
+# Select one OpenAI-compatible LLM endpoint.
+llm_provider: openai
+# llm_url: http://127.0.0.1:8888/v1
+llm_url: http://ollama:11434/v1
+# llm_model: unsloth/Qwen3.5-0.8B-GGUF:BF16
+llm_model: qwen3.5:2b
+llm_tool_mode: structured  # JSON plans avoid small-model native XML tool parsing failures.
+llm_plan_temperature: 0.2  # Lower randomness for structured action decisions and their spoken replies.
+llm_extra_body:
+  reasoning_effort: none
+  stop: ["/think", "/no_think", "<think>", "</think>"]
+
+# Ollama alternative. Comment the active LLM values above and uncomment these.
+# llm_url: http://ollama:11434/v1
+# llm_model: qwen3.5:2b
+# llm_extra_body: {}
+
+# Speech-to-text. The model is downloaded by setup.sh.
+# Faster-whisper (local model)
+# stt_provider: faster-whisper
+# faster_whisper_model: base
+# faster_whisper_device: cpu
+# faster_whisper_compute_type: int8
+# faster_whisper_download_root: .cache/faster-whisper
+
+# Nemotron alternative. Start this service manually:
+# nvidia/nemotron-speech-streaming-en-0.6b (HTTP service)
+# TODO: nemo-speech serve --asr-model nemotron-en --device cpu --host 127.0.0.1 --port 18080
+stt_provider: faster-whisper
+nemotron_url: ws://127.0.0.1:18080/v1/audio/transcriptions/realtime
+nemotron_model: nvidia/nemotron-speech-streaming-en-0.6b
+nemotron_language: en-US  # Sent as session.update.session.language to nemo-speech.
+nemotron_api_key: ""
+nemotron_timeout: 120
+
+# Text-to-speech. Select the voice in the frontend Settings dialog.
+# Supertonic (local ONNX model)
+# tts_provider: supertonic
+# tts_language: en
+# tts_supertonic_steps: 2
+# tts_device: cpu  # auto selects CUDA, then OpenVINO GPU, then CPU; cpu forces CPU
+
+# Kokoro (HTTP service)
+tts_provider: kokoro
+tts_model: kokoro
+tts_url: http://kokoro:8880
+tts_sample_rate: 24000
+
+# Hosted OpenAI-compatible example (set TTS_API_KEY in backend/.env):
+# tts_provider: kokoro
+# tts_model: hexgrad/kokoro-82m
+# tts_url: https://openrouter.ai/api/v1
+
+# Shared speech rate
+tts_speed: 1.0
+# Inline [speed:VALUE] multiplier limits (provider-supported range: 0.25 to 4).
+tts_speed_min: 0.75
+tts_speed_max: 1.5
+# Browser speech amplitude multiplier (1.0 = original volume).
+tts_volume_gain: 1.5
+# Each tagged gesture gets at least this long; longer clips finish naturally.
+gesture_min_duration_seconds: 2.0
+# Wait for this many spoken words, then prefer a complete sentence.
+min_speech_segment_words: 8
+# Split at a complete word when no sentence boundary is available by this limit.
+# The final remainder is sent even if it has fewer than the minimum words.
+max_speech_segment_words: 12
+# One request at a time avoids overlapping CPU inference in the Kokoro service.
+tts_max_concurrent_segments: 1
+
+# Conversation behavior
+enabled: true
+timeout: 120
+temperature: 0.7
+max_tokens: 256
+history_turns: 8
+max_audio_bytes: 10000000
+# Dedicated workers for models loaded by this app. External servers are untouched.
+# auto prefers separate efficiency cores on hybrid Linux CPUs; [] disables affinity.
+model_workers:
+  objects: {cpus: auto, threads: 2}
+  keypoints: {cpus: auto, threads: 3}
+  faces: {cpus: auto, threads: 1}
+  tts: {cpus: auto, threads: 3}
+  stt: {cpus: auto, threads: 3}  # Only applies to local faster-whisper.
+system_prompt_file: llm/prompts/system.txt
+cv_adapter_url: ws://cv:8765
+
+# OpenObserve diagnostics: real LLM payloads/replies and worker execution spans.
+diagnostics_enabled: false
+
+# CV capture-time windows. CV runs independently from the conversation API.
+cv_window_seconds: 1.0
+cv_object_fps: 5.0
+cv_keypoint_fps: 10.0
+cv_retained_windows: 30
+# Visual history sent with every LLM turn, measured by capture time.
+cv_world_history_seconds: 10.0
+# Set above zero to use this many latest windows instead of the seconds setting.
+cv_world_history_windows: 0
+cv_keypoint_history_seconds: 3.0
+cv_keypoint_history_samples: 3000
+cv_max_face_tasks: 4
+cv_face_retry_seconds: 1.0  # Retry unusable captures until a valid face is available.
+
+# Provider settings. Models are selected by name; their caches are managed in code.
+cv:
+  camera:
+    source: frontend
+    device_index: 0
+    width: 640
+    height: 480
+    fps: 30
+    camera_id: default
+    frame_queue_size: 2
+  detection:
+    model: yolo26n  # Ultralytics detection model name
+    device: auto
+    confidence: 0.5
+    iou_threshold: 0.45
+    classes: []
+  tracking:
+    tracker: bytetrack.yaml
+    track_buffer: 30
+    enter_min_frames: 3
+    leave_timeout_sec: 3.0
+  keypoints:
+    pose_model: pose_landmarker_lite
+    face_model: face_landmarker
+    hand_model: hand_landmarker
+    min_confidence: 0.6
+    crop_padding: 0.3  # Add x% of box width/height on EACH side;
+  gestures:
+    confirmation_seconds: 1.2  # Evidence budget leaves room for inference within a natural ~2s action.
+    min_frames: 4
+    max_gap_seconds: 0.5
+    wave_min_reversals: 2
+    wave_min_amplitude_palms: 0.8
+    stationary_max_motion_palms: 0.35
+  face:
+    enabled: true
+    model_name: buffalo_s
+    detection_threshold: 0.5
+    quality:
+      min_face_width: 80
+      min_detection_score: 0.6
+      max_embeddings_per_person: 10
+      min_quality_for_update: 0.7
+    matching:
+      threshold: 0.45
+      ambiguity_margin: 0.05
+  identity:
+    database_path: backend/data/identities.db
+    auto_enroll: true
+    consent_required: true
+  speaker:
+    name_patterns:
+    - (?:my name is|call me|they call me)\s+(\w+)
+    single_person_confidence: 0.7
+    mouth_motion_weight: 0.6
+    ambiguity_threshold: 0.3
+  integration:
+    websocket_host: 0.0.0.0
+    websocket_port: 8765
+    event_cooldown_sec: 1.0
+  logging:
+    level: INFO
+  object_provider: yolo
+  face_provider: insightface
+  keypoint_provider: mediapipe
+  max_frame_bytes: 2000000
+  max_image_pixels: 1920000

@@ -137,3 +137,23 @@ test("releasing Talk during voice-settings lookup never opens the microphone", a
   assert.equal(await starting, false);
   assert.equal(requests, 0);
 });
+
+test("an old flush cannot send end or tear down a new recording after cancellation", async () => {
+  globalThis.WebSocket = { OPEN: 1 };
+  const manager = new STTManager({ endpoint: "http://localhost:8000", sessionId: "test" });
+  manager.state = STTState.LISTENING;
+  manager.socket = { readyState: 1, send() {}, close() {} };
+  manager.captureNode = { disconnect() {}, port: { postMessage() {} } };
+  const stopping = manager.stopRecording();
+  manager.cancelRecording();
+  const sent = [];
+  let newCaptureStopped = false;
+  manager.socket = { readyState: 1, send: (data) => sent.push(data), close() {} };
+  manager.captureNode = { disconnect() { newCaptureStopped = true; }, port: {} };
+  manager.state = STTState.LISTENING;
+  assert.equal(await stopping, false);
+  assert.deepEqual(sent, []);
+  assert.equal(newCaptureStopped, false);
+  assert.equal(manager.isRecording(), true);
+  manager.cancelRecording();
+});

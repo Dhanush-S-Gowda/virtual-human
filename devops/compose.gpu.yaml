@@ -1,0 +1,19 @@
+# NVIDIA acceleration for this workstation. Compose loads this file automatically.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:v0.9.2
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,7 +1,7 @@
 # Start the Docker-based Virtual Human stack.
 param([switch]$Stop, [switch]$Rebuild)
 $ErrorActionPreference = "Stop"
-Push-Location $PSScriptRoot
+Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     if ($Stop) {
         docker compose down

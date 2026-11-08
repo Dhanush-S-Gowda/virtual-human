@@ -1,0 +1,183 @@
+name: virtual-human
+
+services:
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:v0.9.2
+    environment:
+      OMP_NUM_THREADS: ${KOKORO_CPU_THREADS:-3}
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8880/health',
+        timeout=5)
+      interval: 10s
+      timeout: 10s
+      start_period: 120s
+      retries: 60
+    restart: unless-stopped
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+    - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 10m
+    healthcheck:
+      test:
+      - CMD
+      - ollama
+      - list
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+  ollama-init:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint:
+    - /bin/sh
+    - -c
+    command:
+    - ollama pull qwen3.5:2b && ollama run --think=false --keepalive=30m qwen3.5:2b
+      'Reply with READY only.'
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: 'no'
+  speech-init:
+    build:
+      context: ..
+      dockerfile: devops/backend.Dockerfile
+    image: virtual-human-backend:local
+    command:
+    - python
+    - -c
+    - from stt.faster_whisper import _load_model; _load_model(local_files_only=False)
+    volumes:
+    - whisper-models:/app/.cache/faster-whisper
+    restart: 'no'
+  backend:
+    build:
+      context: ..
+      dockerfile: devops/backend.Dockerfile
+    image: virtual-human-backend:local
+    env_file:
+    - path: ../backend/.env
+      required: false
+    environment:
+      OPENOBSERVE_ENABLED: 'false'
+      METRICS_CSV_PATH: /app/data/metrics.csv
+      CELERY_ENABLED: 'true'
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+    - whisper-models:/app/.cache/faster-whisper
+    - backend-data:/app/data
+    depends_on:
+      kokoro:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+      speech-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8000/health',
+        timeout=5)
+      interval: 10s
+      timeout: 10s
+      start_period: 60s
+      retries: 30
+    restart: unless-stopped
+  cv:
+    image: virtual-human-backend:local
+    working_dir: /app/weights
+    command:
+    - python
+    - -m
+    - backend.cv
+    environment:
+      OPENOBSERVE_ENABLED: 'false'
+    volumes:
+    - cv-models:/app/backend/assets/cv
+    - cv-data:/app/backend/data
+    - yolo-models:/app/weights
+    restart: unless-stopped
+  talking-avatar:
+    ports:
+    - 127.0.0.1:4173:4173
+    build:
+      context: ..
+      dockerfile: devops/frontend.Dockerfile
+      args:
+        VITE_BACKEND_URL: /api
+        VITE_CV_URL: ${VITE_CV_URL:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - wget
+      - -q
+      - -O
+      - /dev/null
+      - http://127.0.0.1:4173/
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine
+    command:
+    - redis-server
+    - --appendonly
+    - 'yes'
+    - --appendfsync
+    - everysec
+    volumes:
+    - redis-data:/data
+    healthcheck:
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  worker:
+    image: virtual-human-backend:local
+    command:
+    - celery
+    - -A
+    - background.celery_app
+    - worker
+    - --loglevel=INFO
+    - --concurrency=1
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      METRICS_DB_PATH: /app/data/metrics.sqlite3
+    volumes:
+    - backend-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama-models: null
+  whisper-models: null
+  backend-data: null
+  cv-models: null
+  cv-data: null
+  yolo-models: null
+  redis-data: null

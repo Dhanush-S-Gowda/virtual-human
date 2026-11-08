@@ -98,6 +98,12 @@ class FakeWebSocket:
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
+        if self._testMethodName != "test_yaml_settings_are_loaded":
+            for key, value in {"min_speech_segment_words": 8, "max_speech_segment_words": 8,
+                               "tts_max_concurrent_segments": 1}.items():
+                fixture = patch.object(settings, key, value)
+                fixture.start()
+                self.addCleanup(fixture.stop)
         world_patch = patch("pipeline.current_world", new=AsyncMock(return_value=(
             {"status": "unavailable", "people": [], "objects": [], "speaker": None}, {})))
         world_patch.start()
@@ -120,6 +126,15 @@ class BackendTests(unittest.TestCase):
         asyncio.run(handle_websocket(websocket))
         return websocket.events
 
+    def test_invalid_speech_speed_returns_a_validation_error(self):
+        for speed in (None, "fast", {}, float("nan"), float("inf"), 0.1, 5):
+            with self.subTest(speed=speed):
+                websocket = FakeWebSocket(self.app, {"type": "start", "speed": speed, "text": "hello"})
+                asyncio.run(handle_websocket(websocket))
+                self.assertEqual(websocket.events[0]["type"], "error")
+                self.assertIn("speed must be between", websocket.events[0]["message"])
+        self.assertEqual(self.llm.calls, [])
+
     def test_yaml_settings_are_loaded(self):
         self.assertEqual(settings.llm_provider, "openai")
         configured = yaml.safe_load((_BACKEND_DIR / "config.yaml").read_text())
@@ -129,9 +144,9 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(settings.faster_whisper_model, "base")
         self.assertEqual(settings.faster_whisper_device, "cpu")
         self.assertEqual(settings.faster_whisper_compute_type, "int8")
-        self.assertEqual(settings.min_speech_segment_words, 8)
-        self.assertEqual(settings.max_speech_segment_words, 8)
-        self.assertEqual(settings.tts_max_concurrent_segments, 1)
+        self.assertEqual(settings.min_speech_segment_words, configured["min_speech_segment_words"])
+        self.assertEqual(settings.max_speech_segment_words, configured["max_speech_segment_words"])
+        self.assertEqual(settings.tts_max_concurrent_segments, configured["tts_max_concurrent_segments"])
         self.assertEqual(settings.tts_supertonic_steps, 2)
         self.assertTrue(settings.system_prompt.strip())
 

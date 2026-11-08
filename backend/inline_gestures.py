@@ -23,7 +23,12 @@ class Cue:
 class InlineGestures:
     """Tags never enter displayed text; unknown/malformed bracket tags are omitted."""
 
-    def __init__(self):
+    def __init__(self, speed=1.0, speed_min=0.75, speed_max=1.5):
+        if (not all(type(v) in (int, float) and isfinite(v) for v in (speed, speed_min, speed_max))
+                or not 0.25 <= speed_min <= speed_max <= 4.0):
+            raise ValueError("Invalid inline speed limits.")
+        self.speed_min, self.speed_max = speed_min, speed_max
+        self.speed_changes = [(0, max(speed_min, min(speed_max, speed)))]
         self.pending = None
         self.offset = 0
         self.cues = []
@@ -42,7 +47,19 @@ class InlineGestures:
             elif self.pending is not None:
                 if char == "]":
                     action = TAGS.get(self.pending.strip().casefold()) if not self._too_long else None
-                    if action and len(self.cues) < 32:
+                    tag = self.pending.strip().casefold()
+                    if not self._too_long and tag.startswith("speed:"):
+                        try:
+                            value = float(tag[6:].strip())
+                            if not isfinite(value):
+                                raise ValueError("Non-finite speed")
+                            value = max(self.speed_min, min(self.speed_max, value))
+                            if len(self.speed_changes) >= 64:
+                                raise ValueError("Too many speed changes")
+                            self.speed_changes.append((self.offset, value))
+                        except ValueError:
+                            self.rejected += 1
+                    elif action and len(self.cues) < 32:
                         self.cues.append(Cue(self.offset, action))
                     else:
                         self.rejected += 1
@@ -65,6 +82,19 @@ class InlineGestures:
                     output.append(output_char)
                     self.offset += 1
         return "".join(output)
+
+    def speed_segments(self, text, start):
+        """Split clean text at speed changes, preserving global cue offsets."""
+        end = start + len(text)
+        boundaries = sorted({start, end, *(offset for offset, _ in self.speed_changes if start < offset < end)})
+        for left, right in zip(boundaries, boundaries[1:]):
+            raw = text[left - start:right - start]
+            clean = raw.strip()
+            if not clean:
+                continue
+            offset = left + len(raw) - len(raw.lstrip())
+            speed = next(value for position, value in reversed(self.speed_changes) if position <= offset)
+            yield clean, offset, speed
 
     def finish(self):
         if self.pending is not None:

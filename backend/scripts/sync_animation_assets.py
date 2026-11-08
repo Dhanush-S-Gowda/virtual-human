@@ -8,7 +8,7 @@ import shutil
 
 def sync(root):
     source = root / "TalkingHead/animations"
-    destination = root / "talking-avatar/public/animations"
+    destination = root / "frontend/public/animations"
     destination.mkdir(parents=True, exist_ok=True)
     grouped = {}
     for path in sorted(source.glob("*.fbx")):

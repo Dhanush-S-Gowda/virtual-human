@@ -22,6 +22,7 @@ import { setupCameraResize } from "./ui/cameraResize.js";
 import { setupAvatarFraming } from "./ui/avatarFraming.js";
 import { CallPreferences, avatarOptions, mountCallSettings } from "./ui/callSettings.js";
 import { ConversationLog } from "./ui/conversationLog.js";
+import { renderTrackList } from "./ui/trackList.js";
 
 /**
  * --------------------------------------------------------------------------
@@ -30,9 +31,7 @@ import { ConversationLog } from "./ui/conversationLog.js";
  */
 
 /** Conversation backend base URL. */
-const BACKEND_URL =
-    import.meta.env.VITE_BACKEND_URL ||
-    "http://localhost:8000";
+const BACKEND_URL = new URL(import.meta.env.VITE_BACKEND_URL || "/api", location.origin).href.replace(/\/+$/, "");
 
 /**
  * --------------------------------------------------------------------------
@@ -1193,7 +1192,7 @@ function registerEventHandlers() {
  * --------------------------------------------------------------------------
  */
 
-const CV_WS_URL = import.meta.env.VITE_CV_URL || "ws://localhost:8765";
+const CV_WS_URL = import.meta.env.VITE_CV_URL || `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/cv`;
 let cvSocket = null;
 let cvReconnectTimer = null;
 let lastGestureTime = 0;
@@ -1204,6 +1203,7 @@ let frontendVideoElement = null;
 let frontendCaptureTimer = null;
 let frontendFrameSeq = 0;
 let isFrontendCameraActive = false;
+let frontendCameraStarting = false;
 let latestCVMetadata = null;
 let lastMetadataReceivedTime = 0;
 
@@ -1219,7 +1219,8 @@ offscreenCanvas.height = 480;
 const offscreenCtx = offscreenCanvas.getContext("2d");
 
 async function startFrontendCamera() {
-    if (isFrontendCameraActive) return;
+    if (isFrontendCameraActive || frontendCameraStarting) return;
+    frontendCameraStarting = true;
     try {
         if (!frontendVideoElement) {
             frontendVideoElement = document.createElement("video");
@@ -1246,13 +1247,18 @@ async function startFrontendCamera() {
         isFrontendCameraActive = true;
 
         updateCVPlaceholder(false);
-        updateCVBadge(true);
+        updateCVBadge(cvSocket?.readyState === WebSocket.OPEN);
         console.log("[CV Frontend Camera] Local camera active (640x480). Zero-lag preview running.");
 
         requestAnimationFrame(renderFrontendPreviewLoop);
         startFrontendFrameStreaming();
     } catch (err) {
         console.warn("[CV Frontend Camera] Local camera not active, falling back to backend stream:", err);
+        updateCVPlaceholder(true, err.name === "NotAllowedError"
+            ? "Allow camera access in your browser to show video."
+            : "Camera unavailable. Check that it is connected and not in use.");
+    } finally {
+        frontendCameraStarting = false;
     }
 }
 
@@ -1361,7 +1367,7 @@ function updateCVBadge(connected) {
         badge.textContent = "Live";
     } else {
         badge.className = "cv-badge disconnected";
-        badge.textContent = "Disconnected";
+        badge.textContent = isFrontendCameraActive ? "Camera only" : "Disconnected";
     }
 }
 
@@ -1449,7 +1455,7 @@ function initCVConnection() {
 
         cvSocket.onclose = () => {
             updateCVBadge(false);
-            updateCVPlaceholder(true, "Connecting to CV feed...");
+            updateCVPlaceholder(!isFrontendCameraActive, "Connecting to CV feed...");
             clearTimeout(cvReconnectTimer);
             cvReconnectTimer = setTimeout(initCVConnection, 2000);
         };
@@ -1632,26 +1638,7 @@ function renderCVFrame(imgBitmap, metadata) {
 }
 
 function updateTrackListUI(people) {
-    const listEl = document.getElementById("cvTrackList");
-    if (!listEl) return;
-    if (!people || people.length === 0) {
-        listEl.innerHTML = `<div style="color: #6b7280; font-size: 12px; text-align: center; padding: 6px;">No persons currently tracked</div>`;
-        return;
-    }
-    listEl.innerHTML = people.map(p => {
-        const isKnown = p.display_name && p.display_name !== "Unknown";
-        const name = isKnown ? p.display_name : "Unknown Person";
-        const action = p.actions && p.actions.length ? p.actions.join(", ") : "Idle";
-        return `
-            <div class="track-card ${isKnown ? "known" : ""}">
-                <div>
-                    <div class="track-name">${name}</div>
-                    <div class="track-sub">Track ID: #${p.track_id} ${p.person_id ? `• ${p.person_id.substring(0, 8)}...` : ""}</div>
-                </div>
-                <div class="info-pill" style="font-size: 11px;">${action}</div>
-            </div>
-        `;
-    }).join("");
+    renderTrackList(document.getElementById("cvTrackList"), people);
 }
 
 
@@ -1735,6 +1722,7 @@ async function bootstrap() {
 
         pushToTalk.attach();
 
+        startFrontendCamera();
         initCVConnection();
 
         await initializeAvatar();

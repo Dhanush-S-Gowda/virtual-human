@@ -37,7 +37,7 @@ test("multiple visible people stay unknown without correlated microphone and lip
   assert.equal(detector.snapshot(), null);
   detector.addAudio({ timestamp: 1200, rms: .1 });
   detector.update(frame(1200, [.004, .001]), [alex, sam], 1200);
-  assert.deepEqual(detector.snapshot(), { track_id: 1, generation: 10, source_id: "camera", method: "lip_motion" });
+  assert.deepEqual(detector.snapshot(), { track_id: 1, generation: 10, source_id: "camera", method: "lip_motion", display_name: "Alex" });
   assert.equal(detector.stop()[0].display_name, "Alex");
 });
 

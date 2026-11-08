@@ -32,6 +32,8 @@ DEFAULTS = {
     "min_speech_segment_words": 8,
     "max_speech_segment_words": 8,
     "tts_device": "auto",
+    "tts_speed_min": 0.75,
+    "tts_speed_max": 1.5,
     "tts_model": "kokoro",
     "tts_api_key": "",
     "tts_max_concurrent_segments": 2,
@@ -43,6 +45,13 @@ DEFAULTS = {
     "cv_world_history_windows": 0,
 }
 config = {**DEFAULTS, **(config or {})}
+
+for name in ("tts_speed", "tts_speed_min", "tts_speed_max"):
+    value = config[name]
+    if type(value) not in (int, float) or not isfinite(value) or not 0.25 <= value <= 4.0:
+        raise ValueError(f"{name} must be finite and between 0.25 and 4.0.")
+if not config["tts_speed_min"] <= config["tts_speed"] <= config["tts_speed_max"]:
+    raise ValueError("tts_speed_min <= tts_speed <= tts_speed_max is required.")
 
 history_seconds = config["cv_world_history_seconds"]
 history_windows = config["cv_world_history_windows"]

@@ -359,11 +359,11 @@ holds the next tagged phrase longer than the configured minimum.
 | Per-turn messages, synthesis queues, ordered packet delivery | [pipeline.py](../backend/pipeline.py) |
 | Tag parsing and provider-word cue alignment | [inline_gestures.py](../backend/inline_gestures.py) |
 | Captioned endpoint, WAV, timestamp validation | [kokoro.py](../backend/tts/kokoro.py) |
-| Frontend preparation, settings, Stop and render hooks | [main.js](../talking-avatar/src/main.js) |
-| Silence insertion and word/cue remapping | [GestureSpeechPacer.js](../talking-avatar/src/avatar/GestureSpeechPacer.js) |
-| Due cue scheduling | [GestureTimeline.js](../talking-avatar/src/avatar/GestureTimeline.js) |
-| Clip duration, shared mixer and cross-fades | [AudioGesturePlayer.js](../talking-avatar/src/avatar/AudioGesturePlayer.js) |
-| HA mouth motion and spoken-word priority | [LaughingMouth.js](../talking-avatar/src/avatar/LaughingMouth.js) |
-| Actual audio source start and lip sync | [talkinghead.mjs](../talking-avatar/src/talkinghead/talkinghead.mjs) |
+| Frontend preparation, settings, Stop and render hooks | [main.js](../frontend/src/main.js) |
+| Silence insertion and word/cue remapping | [GestureSpeechPacer.js](../frontend/src/avatar/GestureSpeechPacer.js) |
+| Due cue scheduling | [GestureTimeline.js](../frontend/src/avatar/GestureTimeline.js) |
+| Clip duration, shared mixer and cross-fades | [AudioGesturePlayer.js](../frontend/src/avatar/AudioGesturePlayer.js) |
+| HA mouth motion and spoken-word priority | [LaughingMouth.js](../frontend/src/avatar/LaughingMouth.js) |
+| Actual audio source start and lip sync | [talkinghead.mjs](../frontend/src/talkinghead/talkinghead.mjs) |
 | CV capture windows, revisions and visual history | [window_manager.py](../backend/cv/window_manager.py) |
 | Compact current/historical context | [world.py](../backend/world.py) |

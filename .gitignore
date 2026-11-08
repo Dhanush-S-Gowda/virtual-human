@@ -368,3 +368,6 @@ cv/yolov8n-pose.pt
 backend/assets/cv/
 backend/data/
 backend/metrics.csv
+
+# Local-only generated files
+.local/

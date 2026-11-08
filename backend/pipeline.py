@@ -42,7 +42,7 @@ _METRICS_FIELDS = [
     "gesture_audio_alignment_ms", "tts_text_buffer_ms", "tts_queue_wait_ms",
     "kokoro_queue_wait_ms", "kokoro_first_pcm_ms", "kokoro_total_ms",
     "release_to_first_audio_chunk_ms", "turn_total_ms", "audio_bytes",
-    "tts_segments", "response_segments_json", "tts_audio_chunks", "gesture_rejected_tags", "status",
+    "tts_segments", "tts_segment_ms_json", "kokoro_request_first_byte_ms_json", "response_segments_json", "tts_audio_chunks", "gesture_rejected_tags", "status",
 ]
 
 
@@ -53,7 +53,7 @@ def _ensure_metrics_csv_schema() -> None:
     with _METRICS_FILE.open("r", newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
         existing_fields = reader.fieldnames or []
-        if existing_fields == _METRICS_FIELDS:
+        if all(field in existing_fields for field in _METRICS_FIELDS):
             return
         rows = list(reader)
     aliases = {
@@ -63,12 +63,13 @@ def _ensure_metrics_csv_schema() -> None:
         "release_to_first_audio_chunk_ms": "first_speech_after_release_ms",
         "turn_total_ms": "end_to_end_ms",
     }
+    fields = [*_METRICS_FIELDS, *(field for field in existing_fields if field not in _METRICS_FIELDS)]
     temporary = _METRICS_FILE.with_name(f"{_METRICS_FILE.name}.tmp")
     with temporary.open("w", newline="", encoding="utf-8") as output:
-        writer = csv.DictWriter(output, fieldnames=_METRICS_FIELDS, lineterminator="\n")
+        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for old_row in rows:
-            row = {field: old_row.get(field) for field in _METRICS_FIELDS}
+            row = {field: old_row.get(field) for field in fields}
             for field, old_field in aliases.items():
                 if not row.get(field):
                     row[field] = old_row.get(old_field)
@@ -83,6 +84,7 @@ def _ensure_metrics_csv_schema() -> None:
 def _append_metrics_csv(metrics: dict) -> None:
     """Append one quantitative session summary to the backend metrics CSV."""
     with _METRICS_LOCK:
+        _METRICS_FILE.parent.mkdir(parents=True, exist_ok=True)
         _ensure_metrics_csv_schema()
         file_exists = _METRICS_FILE.exists()
         fields = _METRICS_FIELDS
@@ -102,6 +104,9 @@ def _append_metrics_csv(metrics: dict) -> None:
                 row[field] = metrics.get(old_field)
         if "release_to_transcript_ms" in row and row["release_to_transcript_ms"] is None:
             row["release_to_transcript_ms"] = metrics.get("stt_total_ms")
+        for source in ("tts_segment_ms", "kokoro_request_first_byte_ms"):
+            if f"{source}_json" in row:
+                row[f"{source}_json"] = json.dumps(metrics.get(source, []))
         if "response_segments_json" in row:
             row["response_segments_json"] = json.dumps(metrics.get("response_segments", []), ensure_ascii=False)
         with _METRICS_FILE.open("a", newline="", encoding="utf-8") as output:
@@ -109,6 +114,25 @@ def _append_metrics_csv(metrics: dict) -> None:
             if not file_exists:
                 writer.writeheader()
             writer.writerow(row)
+
+
+async def _save_metrics(metrics):
+    # Diagnostics must never turn a successful conversation into an error.
+    try:
+        await asyncio.to_thread(_append_metrics_csv, metrics)
+    except Exception:
+        logger.exception("Could not write local conversation metrics")
+    if os.getenv("CELERY_ENABLED", "false").lower() == "true":
+        try:
+            from background import record_metrics
+            event_id = str(uuid.uuid4())
+            # Quantitative summaries only; no transcript or camera data in Redis.
+            summary = {key: value for key, value in metrics.items()
+                       if type(value) in (int, float) or key in {
+                           "status", "stt_provider", "stt_model", "tts_provider", "tts_model", "llm_model"}}
+            await asyncio.to_thread(record_metrics.apply_async, args=[event_id, summary], retry=False)
+        except Exception:
+            logger.exception("Could not queue metrics; local CSV is the fallback")
 
 
 def _model_details():
@@ -543,7 +567,10 @@ async def handle_websocket(websocket: Any):
         bind_session(session_id)
         mime_type = str(first.get("mime_type", "audio/webm"))[:100]
         voice = resolve_voice(settings.tts_provider, first.get("voice"))
-        speed = float(first.get("speed", settings.tts_speed))
+        try:
+            speed = float(first.get("speed", settings.tts_speed))
+        except (TypeError, ValueError):
+            speed = float("nan")  # Rejected by the range check below.
         provided_text = str(first.get("text", "")).strip()
         mode = str(first.get("mode", "conversation"))
         if mode not in {"conversation", "speak"}:
@@ -552,9 +579,9 @@ async def handle_websocket(websocket: Any):
             )
             await websocket.close(code=1008)
             return
-        if not 0.25 <= speed <= 4.0:
+        if not settings.tts_speed_min <= speed <= settings.tts_speed_max:
             await websocket.send_json(
-                {"type": "error", "message": "speed must be between 0.25 and 4.0."}
+                {"type": "error", "message": f"speed must be between {settings.tts_speed_min} and {settings.tts_speed_max}."}
             )
             await websocket.close(code=1008)
             return
@@ -611,7 +638,7 @@ async def handle_websocket(websocket: Any):
                 **_model_details(),
             }
             metrics["kokoro_total_ms"] = tts_metrics.get("kokoro_total_ms")
-            _append_metrics_csv(metrics)
+            await _save_metrics(metrics)
             logger.info("Speech response segments=%s metrics=%s", 1, metrics)
             await websocket.send_json({"type": "metrics", "metrics": metrics})
             await websocket.send_json({"type": "done"})
@@ -742,7 +769,7 @@ async def handle_websocket(websocket: Any):
                     **_model_details(),
                 }
             )
-            _append_metrics_csv(metrics)
+            await _save_metrics(metrics)
             manager.record_turn(session_id, metrics)
             logger.info("Conversation metrics metrics=%s", metrics)
             await websocket.send_json({"type": "metrics", "metrics": metrics})
@@ -771,7 +798,7 @@ async def handle_websocket(websocket: Any):
         first_synthesis_started = None
         speech_queue: asyncio.Queue = asyncio.Queue()
 
-        async def synthesize_segment(segment_index, segment_text, raw_text, cues, output):
+        async def synthesize_segment(segment_index, segment_text, raw_text, cues, segment_speed, output):
             nonlocal first_synthesis_started
             tts_started = perf_counter()
             if first_synthesis_started is None:
@@ -784,7 +811,7 @@ async def handle_websocket(websocket: Any):
                 gestures = []
                 quality = "estimated"
                 async with aclosing(_synthesize_chunks(
-                    websocket.app.state.providers.tts, segment_text, voice, speed, metrics
+                    websocket.app.state.providers.tts, segment_text, voice, segment_speed, metrics
                 )) as chunks:
                     async for result in chunks:
                         alignment_started = perf_counter()
@@ -838,9 +865,9 @@ async def handle_websocket(websocket: Any):
             next_to_send = 0
             done_event = asyncio.Event()
 
-            async def bounded_synthesize(idx, seg_text, raw_text, cues, output):
+            async def bounded_synthesize(idx, seg_text, raw_text, cues, segment_speed, output):
                 async with sem:
-                    await synthesize_segment(idx, seg_text, raw_text, cues, output)
+                    await synthesize_segment(idx, seg_text, raw_text, cues, segment_speed, output)
 
             async def sender():
                 nonlocal next_to_send
@@ -863,10 +890,10 @@ async def handle_websocket(websocket: Any):
                         if item is None:
                             done_event.set()
                             break
-                        idx, seg_text, raw_text, cues = item
+                        idx, seg_text, raw_text, cues, segment_speed = item
                         output = asyncio.Queue(maxsize=2)
                         active_tasks[idx] = output
-                        task = asyncio.create_task(bounded_synthesize(idx, seg_text, raw_text, cues, output))
+                        task = asyncio.create_task(bounded_synthesize(idx, seg_text, raw_text, cues, segment_speed, output))
                         producers.add(task)
                         task.add_done_callback(producers.discard)
                     finally:
@@ -883,7 +910,7 @@ async def handle_websocket(websocket: Any):
         reply_parts, text_buffer = [], ""
         segment_index = 0
         metrics["response_segments"] = []
-        inline = InlineGestures()
+        inline = InlineGestures(speed, settings.tts_speed_min, settings.tts_speed_max)
         gesture_tags_seen = []
         gesture_tag_keys = set()
         buffer_origin = 0
@@ -896,19 +923,20 @@ async def handle_websocket(websocket: Any):
             for segment in ready:
                 start = original.index(segment, cursor)
                 cursor = start + len(segment)
-                cue_assignment_started = perf_counter()
-                cues = take_segment_cues(inline, buffer_origin + start, segment)
-                metrics["gesture_cue_assignment_ms"] = (
-                    metrics.get("gesture_cue_assignment_ms", 0.0)
-                    + (perf_counter() - cue_assignment_started) * 1000
-                )
-                speech_text = normalize_for_tts(segment)
-                if speech_text:
-                    metrics["response_segments"].append(speech_text)
-                    if first_segment_queued is None:
-                        first_segment_queued = perf_counter()
-                    await speech_queue.put((segment_index, speech_text, segment, cues))
-                    segment_index += 1
+                for segment, absolute_start, segment_speed in inline.speed_segments(segment, buffer_origin + start):
+                    cue_assignment_started = perf_counter()
+                    cues = take_segment_cues(inline, absolute_start, segment)
+                    metrics["gesture_cue_assignment_ms"] = (
+                        metrics.get("gesture_cue_assignment_ms", 0.0)
+                        + (perf_counter() - cue_assignment_started) * 1000
+                    )
+                    speech_text = normalize_for_tts(segment)
+                    if speech_text:
+                        metrics["response_segments"].append(speech_text)
+                        if first_segment_queued is None:
+                            first_segment_queued = perf_counter()
+                        await speech_queue.put((segment_index, speech_text, segment, cues, segment_speed))
+                        segment_index += 1
             buffer_origin += len(original) - len(remaining)
             text_buffer = remaining
         try:
@@ -1005,7 +1033,7 @@ async def handle_websocket(websocket: Any):
             if first_pcm_at is not None else None)
         metrics["llm_output_bytes"] = len(reply.encode("utf-8"))
         record("conversation", "turn_metrics", metrics=metrics)
-        _append_metrics_csv(metrics)
+        await _save_metrics(metrics)
         manager.record_turn(session_id, metrics)
         logger.info(
             "Final LLM response: %s | server_tokens_per_second=%s | segments=%s",
