@@ -27,3 +27,17 @@ retrieval and 2,336.56 ms full reply generation. The 12 memory regression tests
 also passed again. They cover persistence, retention, conversation isolation,
 semantic matching, recent-turn exclusion, vector validation, correction ranking,
 deduplication, keyword fallback, failed replies, and speech preference restore.
+
+## Exact numeric recall regression
+
+A reported reply changed the user's number `347` into a list containing
+`2, 3, 4, and 7`. The prompt now requires exact copying of recalled numbers,
+preserves leading zeros, prefers the latest explicit request when unqualified,
+and rejects treating an assistant's mistaken answer as a new user fact.
+
+The expanded local Qwen evaluation passed all five cases: the exact reported
+exchange (`347`), replacing an older `2347` with `347`, the code `00347`, older
+project-number recall, and the corrected breakfast preference. Numeric checks
+require the single expected digit token, rather than a substring match.
+The memory regression suite passed 13 tests. These results reduce the observed
+failure; prompt guidance cannot guarantee all future model outputs.

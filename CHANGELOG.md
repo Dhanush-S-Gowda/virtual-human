@@ -3,6 +3,18 @@
 Local change owner: **Bhvan Madhusudhan**. Upstream commits retain their original
 authorship. Entries describe implemented changes and the checks actually run.
 
+## 2026-11-08 - Exact numeric memory recall
+
+Change owner: **Bhvan Madhusudhan**.
+
+- Added explicit prompt rules to copy recalled numbers without splitting,
+  combining, or adding digits, and to preserve leading zeros in codes.
+- Added the reported `347` exchange, a replacement-number case, and a
+  leading-zero case to the local-model evaluation. Failed checks now return a
+  nonzero exit status.
+- Validation: 13 memory regression tests passed; all five local Qwen memory
+  evaluation cases passed, including the exact reported exchange.
+
 ## 2026-11-08 - Persistent conversation memory and retrieval
 
 Change owner: **Bhvan Madhusudhan**.

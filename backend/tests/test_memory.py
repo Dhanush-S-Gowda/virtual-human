@@ -122,3 +122,21 @@ async def test_completed_reply_and_preference_survive_restart(store):
     assert restored.history[0]["content"] == "Hello"
     assert restored.speech_speed_preference == .8
     await memory.close()
+
+
+@pytest.mark.asyncio
+async def test_numeric_recall_keeps_original_user_fact_and_newer_request(store):
+    memory = ConversationMemory(store)
+    await memory.start()
+    store.save("a", "Remember the number 2347", "Okay")
+    store.save("a", "Hi, can you remember the number 347?", "I can remember that for you: 347.")
+    store.save("a", "Can you tell me the number I said you remember?",
+               "The numbers are 2, 3, 4, and 7.")
+    llm = FakeLLM()
+    conversation = Conversation(llm, "a", memory)
+    _ = [part async for part in conversation.stream_reply("What number did I ask you to remember?")]
+    users = [message["content"] for message in llm.calls[0] if message["role"] == "user"]
+    assert users[-3] == "Hi, can you remember the number 347?"
+    assert "copy the requested fact exactly" in llm.calls[0][0]["content"]
+    assert "An assistant's incorrect recollection is not a new user fact" in llm.calls[0][0]["content"]
+    await memory.close()
