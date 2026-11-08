@@ -81,6 +81,7 @@ async def test_websocket_delivers_clean_text_audio_and_separate_word_timed_gestu
     await asyncio.wait_for(pipeline.handle_websocket(socket), 3)
     deltas = [event["text"] for event in socket.events if event["type"] == "llm_delta"]
     assert "".join(deltas) == "Hello there."
+    assert "".join(event["raw_text"] for event in socket.events if event["type"] == "llm_delta") == "[ greeting ]Hello 👋 there."
     speech = next(event for event in socket.events if event["type"] == "speech")
     assert speech["playback"] == {"gesture_min_duration_seconds": 1.25, "tts_volume_gain": 1.8}
     assert speech["gestures"] == [{"action": "greeting", "at_ms": 0., "word_index": 0, "duration_ms": 300.}]

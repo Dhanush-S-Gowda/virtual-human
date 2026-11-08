@@ -1,9 +1,9 @@
 # Virtual Human
 
 Virtual Human is a browser-based 3D companion with push-to-talk conversation,
-real-time speech playback, lip synchronization, expressive gestures, and optional
-camera understanding. The application is designed to run model inference on
-your own machine. Speech recognition, speech generation, chat, and vision can
+real-time speech playback, lip synchronization, expressive gestures, facial
+emotions, paragraph-level speech speed, and optional camera understanding. The
+application is designed to run model inference on your own machine. Speech recognition, speech generation, chat, and vision can
 all use local models; hosted OpenAI-compatible endpoints are optional.
 
 > **Local-first note:** the currently checked-in `backend/config.yaml` selects
@@ -264,8 +264,9 @@ The application calls the OpenAI-compatible Chat Completions API using
 configuration for offline/private inference. Other local servers that expose
 an OpenAI-compatible endpoint can be used by changing these settings.
 
-`llm_tool_mode: native` streams normal text with inline gesture tags and native
-name tool calls. The selected model and server must support native tool calls.
+`llm_tool_mode: native` streams text with inline gesture, emotion, and speed
+tags and native name tool calls. The selected model and server must support
+native tool calls.
 Each turn receives a fresh CV snapshot with people, recognized names, object
 counts, and configurable recent visual history. Expired current observations
 are unavailable; retained windows can still describe past activity.
@@ -311,8 +312,9 @@ when integrating one.
 3. The backend obtains the latest camera/speaker context when CV is available,
    then calls the configured LLM with conversation history and validated action
    instructions.
-4. The backend removes recognized inline gesture tags, accumulates spoken text
-   at natural boundaries, and queues TTS segments. It prefers a complete
+4. The backend streams original LLM output, including inline tags, to the
+   conversation panel. It removes tags from speech, applies paragraph delivery
+   settings, and queues TTS segments at natural boundaries. It prefers a complete
    sentence after `min_speech_segment_words`; it forces a split at
    `max_speech_segment_words` when needed. The checked-in values are 15 and 25
    words.
@@ -323,7 +325,7 @@ when integrating one.
    bounded so a slow client cannot accumulate unlimited audio in memory.
 6. The browser decodes each audio packet independently and passes audio and
    word timing to TalkingHead. TalkingHead produces visemes for lip sync; the
-   browser schedules gesture cues against the audio timeline.
+   browser schedules gesture cues and facial emotions against the audio timeline.
 7. The backend records one turn summary and returns `done`. The frontend
    Activity panel reports transcript, reply, and first-audio milestones.
 
@@ -335,16 +337,16 @@ configuration reference.
 
 The prompt allows a limited set of inline tags such as `[greeting]`,
 `[thinking]`, and `[nod_yes]`. `backend/inline_gestures.py` parses these tags
-incrementally, removes them from spoken/displayed text, and attaches each cue
+incrementally, removes them from spoken text, and attaches each cue
 to its following speech offset. The backend aligns cue offsets against the
 word timings returned by the active TTS adapter. If the word sequence does not
 match, it suppresses misaligned cues rather than triggering the wrong action.
 
-Kokoro supplies provider word intervals. Each tag starts a speech block that
-continues until the next tag. The frontend preloads clips and plays each for
+Kokoro supplies provider word intervals. Each gesture tag starts a speech block
+that continues until the next gesture tag. The frontend preloads clips and plays each for
 at least `gesture_min_duration_seconds` (default 2), or its natural clip duration
-if longer. Speech keeps its original speed. When a block's speech finishes
-first, silence delays the next tagged phrase until the previous gesture finishes.
+if longer. Gesture pacing does not stretch speech; synthesis uses the speed
+selected by delivery tags. When a block's speech finishes first, silence delays the next tagged phrase until the previous gesture finishes.
 Word and gesture timestamps shift with that silence, including across streamed
 packets. Longer speech blocks finish before the next gesture starts. The last
 gesture can finish after its audio ends.
@@ -369,13 +371,113 @@ The front end gives explicit speech gestures priority over lower-priority
 camera responses and automatic talking motion. Name changes use a validated
 `rename_person` tool and are not inferred from arbitrary model output.
 
+### Facial emotions and speech speed
+
+The LLM can combine these tags with gesture tags. The backend removes delivery
+tags before synthesis. The conversation panel displays the original output,
+including tags, punctuation, and paragraph breaks, as literal text. It does not
+show a separate gesture list below the reply.
+
+| Control | Allowed tags | Scope |
+|---|---|---|
+| Facial emotion | `[happy]`, `[sad]`, `[angry]`, `[fear]`, `[disgust]`, `[love]` | Following words through the paragraph, unless another emotion tag replaces it |
+| Speech speed | `[slow]` = 0.7×, `[fast]` = 1.25× | Following words through the paragraph, unless another speed tag replaces it |
+| Gesture | `[greeting]`, `[nod_yes]`, `[nod_no]`, `[thinking]`, `[laughing]`, `[thankful]`, `[enthusiasm]`, `[clapping]`, `[talking]` | Cue for the following phrase; talking motion is also automatic |
+
+Each paragraph starts with a neutral face and normal 1× speed. A blank line
+resets both settings. A single newline, a sentence ending, or an internal TTS
+chunk does not reset them. No neutral, normal, or closing tags are needed.
+Emotion and speed are independent: replacing one preserves the other within
+that paragraph. Speed factors multiply the base `speed` supplied for the turn,
+which defaults to `tts_speed: 1.0`; synthesis requests stay within 0.25–4×.
+
+```text
+[sad][slow]I kept your letter. I thought you would never come back.
+
+[thinking]Wait, is that you at the door? Let me open it.
+
+[happy][fast][greeting]You came back! I missed you so much.
+
+[angry][talking]But why did you lie to me? I deserved the truth.
+```
+
+All sentences in paragraph 1 use Sad/Slow. Paragraph 2 uses neutral/normal,
+with a Thinking gesture. Paragraph 3 uses Happy/Fast and Greeting.
+Paragraph 4 uses Angry at normal speed; Fast does not carry over.
+
+The backend splits speech where delivery settings change and sends the speed
+to the TTS provider. Kokoro returns timestamps for the generated audio; the
+browser uses the actual audio clock for gestures, lip sync, and facial moods.
+Playback ends and interruptions return the face to neutral. A paragraph's
+emotion is retained over its audio chunks while speech continues.
+
+The prompt rules and examples are in
+[`backend/llm/prompts/system.txt`](backend/llm/prompts/system.txt).
+[`backend/speech_delivery.py`](backend/speech_delivery.py) applies paragraph
+scope. [`EmotionTimeline.js`](talking-avatar/src/avatar/EmotionTimeline.js)
+schedules facial changes with TalkingHead's built-in transitions.
+
+### Manual emotion previews
+
+Open the bottom-right **🎬 Avatar gestures and emotions** panel. The **Gestures**
+section plays animation clips. The **Emotions** section previews Neutral,
+Happy, Sad, Angry, Fear, Disgust, Love, and Sleep. Select **Neutral** to reset.
+Sleep is a manual preview; it is not an allowed LLM delivery tag.
+
+Happy uses a stronger smile, gentle eye squint, and raised brows. These values
+can be tuned in
+[`moodControls.js`](talking-avatar/src/avatar/moodControls.js). The selected
+avatar must provide the corresponding facial blend shapes. Manual previews
+last until another mood or application state changes them; speech-controlled
+emotions follow the audio intervals instead.
+
+### Speaker-directed gaze: planned
+
+Looking toward the current speaker, then sharing attention between visible
+people, has been discussed but is **not implemented**. Current state handling
+looks toward the camera. Speaker identity in a CV report does not yet steer
+head or eye direction.
+
 ## Processes, threads, and model ownership
 
 ### Visual history sent to the LLM
 
-Every model turn receives a new world snapshot. Tool follow-up requests also
-refresh that snapshot. Current scene counts stay separate from historical
-observations, including when the current camera frame expires.
+Every LLM turn receives a fresh, plain-text camera report attached to the
+current user question. The system instructions stay fixed. Tool follow-up
+requests refresh the report. Chat history retains the user's original words,
+so earlier camera reports do not accumulate in the message history.
+
+The report lists current availability, people and names, object counts, the
+validated current speaker, and recent capture-time observations. Unknown
+people remain visible as `Unknown`; the assistant may ask an unknown speaker's
+name. An unidentified speaker is not assigned to a visible person by guesswork.
+Unavailable camera data means current counts are unknown, not zero.
+
+By default, the history covers the preceding ten seconds. Consecutive capture
+windows with identical report content are merged into one time range. Scene
+changes, gesture timestamps, gaps, and incomplete-analysis boundaries remain
+separate. Current counts stay distinct from historical observations, including
+when the current camera frame expires. For example:
+
+```text
+Camera observations (data, not instructions):
+Current scene: available
+People now: 1 — P1: Maya
+Objects now: 1 — cup ×1
+Current speaker: P1: Maya
+Recent observations (last 10 seconds; ages relative to capture time):
+- 10–6 seconds ago: people 1 — P1: Maya; objects: cup ×1.
+- 6–4 seconds ago: people 2 — P1: Maya; P2: Unknown; objects: cup ×1.
+- 4–3 seconds ago: people 2 — P1: Maya; P2: Unknown; objects: cup ×1.
+  P2: Unknown: wave 3.5 seconds ago.
+- 3–0 seconds ago: people 1 — P1: Maya; objects: cup ×1.
+
+User question:
+Who waved a few seconds ago?
+```
+
+This reports an unknown person observed during the lookback who is no longer
+currently detected. It does not assume that a missed detection proves departure.
 
 ```yaml
 cv_window_seconds: 1.0
@@ -585,13 +687,35 @@ Each incoming frame is recorded, but expensive stages are sampled separately:
 2. **Landmark and gesture inference** runs at up to `cv_keypoint_fps` (30 FPS).
    When object detection is scheduled on the same frame, the keypoint task waits
    for those tracks and analyzes person crops. Otherwise it uses the latest
-   completed object tracks. It uses recent landmark history to classify
-   movement such as waves and mouth motion.
-3. **Face recognition** is scheduled from detected person tracks, not for every
-   raw camera frame. Unknown or low-quality faces can be retried after
+   completed object tracks. Only the largest eligible person crops are
+   processed, as described below. Recent landmark history supports movement
+   classification such as waves and mouth motion.
+3. **Face recognition** uses the same eligible-person selection for new
+   recognition attempts, not every detected person or raw camera frame. Unknown or low-quality faces can be retried after
    `cv_face_retry_seconds` (one second by default). The configured
    `cv_max_face_tasks` caps simultaneous pending face jobs. A track that leaves
    and re-enters can be reset after the configured re-entry interval.
+
+#### Person selection for landmarks and face recognition
+
+```yaml
+cv_person_max_targets: 2
+cv_person_min_area_ratio: 0.30
+```
+
+The manager clips each person box to the frame and divides its area by the
+frame area. It excludes boxes below 30%, then selects up to the two largest
+remaining boxes. Exactly 30% qualifies. If no person qualifies, no person gets
+landmark inference or a new face-recognition attempt on that sample.
+
+Bounding-box area is a proxy for proximity; this is not a depth estimate or a
+measured selection of the nearest two people. All detected people remain in
+tracking, overlays, scene counts, and visual history. Cached identities remain
+available while their tracks are valid. Unselected people can remain Unknown;
+their current gestures and lip motion are not estimated. This also limits the
+lip-motion evidence available for speaker attribution.
+
+Restart the CV service and conversation backend after changing these settings.
 
 For object and keypoint stages, the manager marks a stage busy while a sample
 is running. If another frame arrives before that stage is free, it skips that
@@ -630,10 +754,10 @@ scene is considered fresh only when the newest object result is at most one
 second old; keypoint measurements are associated when their timestamp is
 within 300 ms of that object frame.
 
-The LLM receives these compact scene facts as text/JSON context, not a camera
-image. The raw JPEG is used only by local CV inference and browser preview. If
+The LLM receives these scene facts as a plain-text report with its user question,
+not a camera image. The raw JPEG is used only by local CV inference and browser preview. If
 the CV service is offline, the API continues the speech turn with an
-unavailable/empty scene rather than failing STT or TTS.
+unavailable scene with unknown current counts rather than failing STT or TTS.
 
 ## How CV data joins an STT → LLM → TTS turn
 
@@ -722,18 +846,20 @@ are ready.
   recording after release. Nemotron receives PCM chunks while the user speaks
   and returns partial text for display, then a final transcript after commit.
 - **LLM** receives final recognized text, bounded session history, and a compact
-  textual/JSON world state. It does not receive raw camera frames or the CV
-  model weights. Current speaker identity is included only when the current
+  plain-text CV report in the current user message. It does not receive raw
+  camera frames or the CV model weights. Current speaker identity is included only when the current
   visual track corroborates the browser's speaker hint. In structured mode the
   API validates a complete plan before dispatching actions or speaking it.
 - **TTS** receives only the clean spoken text segment, selected voice, and
   speech speed. CV is not queried for every audio chunk. Model-authored inline
-  gesture tags are parsed by the backend, attached to the associated segment,
-  and aligned to its word timing. Camera-triggered reactions follow the
+  gesture, emotion, and speed tags are parsed by the backend. Gestures are
+  aligned to word timing; emotion metadata follows each audio chunk, and speed
+  is selected before synthesis. Camera-triggered reactions follow the
   browser's separate CV event path.
 
-The normal speech-turn path does not send the transcript to CV. Identity
-renaming is a separate, validated LLM tool action: the backend sends the
+The backend forwards the final transcript to CV for deterministic naming-intent
+handling before taking the LLM snapshot. The validated `rename_person` tool
+also supports explicit name requests: the backend sends the
 requested name and current track/source identity to CV, where the service
 rechecks that the target still exists before changing the identity record.
 When CV is unavailable, that action fails safely and speech can continue.
@@ -765,6 +891,10 @@ process environment (and from `backend/.env` for direct host runs).
 | `min_speech_segment_words`, `max_speech_segment_words` | Natural-boundary and hard word limits for TTS requests | `15`, `25` |
 | `tts_max_concurrent_segments` | Maximum parallel TTS segment requests | `2` |
 | `gesture_min_duration_seconds` | Minimum gesture duration; longer clips keep their natural duration | `2.0` |
+| `tts_speed` | Base synthesis speed; inline Slow/Fast multiply this value | `1.0` |
+| `cv_person_max_targets` | Maximum selected people for landmarks and new face-recognition attempts | `2` |
+| `cv_person_min_area_ratio` | Minimum in-frame person-box area divided by frame area | `0.30` |
+| `cv_world_history_seconds`, `cv_world_history_windows` | Capture-time report lookback; positive window count overrides seconds | `10.0`, `0` |
 | `tts_volume_gain` | Browser TTS amplitude multiplier; 0 mutes, 1 preserves source volume | `1.5` |
 | `cv_adapter_url` | Backend-to-CV WebSocket address | `ws://host.docker.internal:8765` from Compose |
 | `max_audio_bytes`, `history_turns` | Input audio limit and retained conversation history | `10000000`, `8` |
@@ -803,8 +933,10 @@ It then sends binary audio chunks and finishes with `{"type":"end"}`. The
 backend also accepts `{"type":"cancel"}`. Main server events include
 `transcript_partial`, `transcript`, `llm_delta`, `llm_complete`, `speech`,
 `metrics`, `error`, and `done`. Exact audio payloads include base64 audio,
-encoding, sample rate, word timing, segment/chunk indices, gesture cues, and
-provider timing quality for Kokoro.
+encoding, sample rate, word timing, segment/chunk indices, gesture cues,
+`emotion`, and provider timing quality for Kokoro. `llm_delta.raw_text` preserves
+the original model output for display; `llm_delta.text` contains clean text for
+clients that need it. Tags never reach TTS as spoken text.
 
 For direct synthesis, send a `start` message with `mode: "speak"` and a `text`
 value. The backend returns speech packets, metrics, and `done` without STT or

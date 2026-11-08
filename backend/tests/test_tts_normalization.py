@@ -89,6 +89,7 @@ async def test_streaming_sanitizes_display_history_and_speech_without_losing_ord
     assert [event["index"] for event in speech] == list(range(len(expected)))
     expected_display = "Hello. **Welcome** back!" if reply.startswith("Hello") else "!."
     assert "".join(event["text"] for event in client.events if event["type"] == "llm_delta") == expected_display
+    assert "".join(event["raw_text"] for event in client.events if event["type"] == "llm_delta") == reply
     assert client.events[-1] == {"type": "done", "text": expected_display}
     assert normalize_for_tts(app.state.conversations["test"].history[-1]["content"]) == normalize_for_tts(reply)
     metrics = next(event["metrics"] for event in client.events if event["type"] == "metrics")

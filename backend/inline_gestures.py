@@ -1,4 +1,4 @@
-"""Bounded incremental gesture-tag parsing and TTS word-time alignment."""
+"""Bounded delivery/gesture tag parsing and TTS word-time alignment."""
 
 from dataclasses import dataclass
 from math import isfinite
@@ -6,6 +6,7 @@ import re
 import json
 from pathlib import Path
 
+from speech_delivery import EMOTIONS, SPEEDS, PARAGRAPH_BREAK
 from tts.normalization import normalize_for_tts, sanitize_tts_characters
 
 
@@ -27,13 +28,29 @@ class InlineGestures:
         self.pending = None
         self.offset = 0
         self.cues = []
+        self.delivery_cues = []
         self.rejected = 0
         self._too_long = False
         self._pending_space = False
+        self._line_breaks = 0
+        self._last_cr = False
 
     def feed(self, text):
         output = []
         for char in text:
+            if self.pending is None:
+                if char in "\r\n":
+                    if not (char == "\n" and self._last_cr):
+                        self._line_breaks += 1
+                        if self._line_breaks == 2:
+                            # Whitespace is collapsed for speech, so retain its
+                            # paragraph boundary independently of spoken text.
+                            self.delivery_cues.append(Cue(self.offset, PARAGRAPH_BREAK))
+                    self._last_cr = char == "\r"
+                else:
+                    self._last_cr = False
+                    if not char.isspace():
+                        self._line_breaks = 0
             if char == "[":
                 if self.pending is not None:
                     self.rejected += 1
@@ -41,9 +58,12 @@ class InlineGestures:
                 self._too_long = False
             elif self.pending is not None:
                 if char == "]":
-                    action = TAGS.get(self.pending.strip().casefold()) if not self._too_long else None
+                    tag = self.pending.strip().casefold() if not self._too_long else ""
+                    action = TAGS.get(tag)
                     if action and len(self.cues) < 32:
                         self.cues.append(Cue(self.offset, action))
+                    elif (tag in EMOTIONS or tag in SPEEDS) and len(self.delivery_cues) < 32:
+                        self.delivery_cues.append(Cue(self.offset, tag))
                     else:
                         self.rejected += 1
                     self.pending = None
@@ -96,15 +116,15 @@ def align_cues(text, cues, payload):
     return output
 
 
-def take_segment_cues(parser, start, text):
+def take_segment_cues(parser, start, text, attribute="cues"):
     selected, pending = [], []
-    for cue in parser.cues:
+    for cue in getattr(parser, attribute):
         offset = max(0, cue.offset - start)
         if offset < len(text) and _WORDS.search(text, offset):
             selected.append(Cue(offset, cue.action))
         else:
             pending.append(cue)
-    parser.cues = pending
+    setattr(parser, attribute, pending)
     return selected
 
 

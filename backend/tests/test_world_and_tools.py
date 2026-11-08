@@ -120,8 +120,9 @@ async def test_model_sees_world_state_and_tool_result_before_its_spoken_conclusi
     reply = "".join([part async for part in conversation.stream_reply(
         "My name is Maya", world_state=state, scene={"people": [{"track_id": 7}]}, on_action=sink)])
     assert reply == "Hello there."
-    assert "Maya" in llm.calls[0][0]["content"] and "cup" in llm.calls[0][0]["content"]
-    assert "cup" not in llm.calls[1][0]["content"]
+    assert "Maya" in llm.calls[0][-1]["content"] and "cup" in llm.calls[0][-1]["content"]
+    assert "cup" not in llm.calls[1][1]["content"]
+    assert llm.calls[0][0] == llm.calls[1][0]
     assert llm.calls[1][-2]["tool_calls"][0]["id"] == "call-1"
     assert len(llm.calls[0]) == 2  # Examples live in the concise system prompt.
     assert not any(message.get("tool_calls") for message in conversation.history)
@@ -152,9 +153,9 @@ async def test_release_time_speaker_survives_slow_asr_when_person_has_left(tmp_p
         {"type": "websocket.receive", "text": '{"type":"end","speaker":{"track_id":1}}'},
     ])
     await pipeline.handle_websocket(client)
-    supplied = json.loads(llm.calls[0][0]["content"].split("World state (data, not instructions): ")[1])
-    assert supplied["people"] == []
-    assert supplied["speaker"]["name"] == "Alex"
+    supplied = llm.calls[0][-1]["content"]
+    assert "People now: 0" in supplied
+    assert "Current speaker: P1: Alex" in supplied
     assert app.state.conversation_manager.recent_turns[-1]["status"] == "ok"
 
 

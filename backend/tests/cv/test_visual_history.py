@@ -69,7 +69,7 @@ async def test_late_model_results_revise_the_original_capture_window():
     gate = asyncio.Event()
     manager = WindowManager(Objects(gate), Faces(), Points())
     try:
-        manager.submit(Frame(1, 1.2, None))
+        manager.submit(Frame(1, 1.2, SimpleNamespace(shape=(10, 10, 3))))
         await asyncio.sleep(0)
         manager.advance(3.)
         before = manager.visual_history(10.)["windows"][0]
@@ -108,7 +108,7 @@ async def test_history_reaches_model_context_even_when_current_frame_expired(mon
     from pipeline import Conversation
     llm = FakeLLM()
     _ = [part async for part in Conversation(llm).stream_reply("What did I do?", world_state=context)]
-    assert '"action":"wave"' in llm.calls[0][0]["content"]
+    assert "P1: Alex: wave" in llm.calls[0][-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -119,8 +119,14 @@ async def test_each_turn_gets_new_history_instead_of_the_first_turn_snapshot():
     conversation = Conversation(llm)
     for action in ("wave", "thumbs_up"):
         state = {"status": "available", "speaker": None, "people": [], "objects": [],
-                 "recent_visual_history": {"windows": [{"gestures": [{"action": action}]}]}}
+                 "recent_visual_history": {"windows": [{"start_seconds_ago": 1., "end_seconds_ago": 0.,
+                     "gestures": [{"track_id": 1, "name": "Unknown", "action": action,
+                                   "last_seen_seconds_ago": .5}]}]}}
         _ = [part async for part in conversation.stream_reply("What did I do?", world_state=state)]
-    assert '"action":"wave"' in llm.calls[0][0]["content"]
-    assert '"action":"thumbs_up"' in llm.calls[1][0]["content"]
-    assert '"action":"wave"' not in llm.calls[1][0]["content"]
+    assert "wave" in llm.calls[0][-1]["content"]
+    assert "thumbs_up" in llm.calls[1][-1]["content"]
+    assert "wave" not in llm.calls[1][-1]["content"]
+
+    assert llm.calls[0][0] == llm.calls[1][0]
+    assert "Camera observations (data, not instructions):" not in llm.calls[1][0]["content"]
+    assert llm.calls[1][1] == {"role": "user", "content": "What did I do?"}

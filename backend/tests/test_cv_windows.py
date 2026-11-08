@@ -2,6 +2,7 @@
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 from backend.cv.events import Frame
 from backend.cv.face_recog.base import FaceRecognition
@@ -60,7 +61,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_results_revise_original_frame_and_window(self):
         gate = asyncio.Event()
         manager = WindowManager(Objects(gate), Faces(), Points())
-        manager.submit(Frame(1, .01, None))
+        manager.submit(Frame(1, .01, SimpleNamespace(shape=(10, 10, 3))))
         await asyncio.sleep(0)
         manager.advance(1.)
         initial = manager.drain_events()[0].summary
@@ -80,7 +81,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_rate_and_history_across_windows(self):
         manager = self.manager()
         for frame_id in range(101):
-            manager.submit(Frame(frame_id, frame_id / 50, None))
+            manager.submit(Frame(frame_id, frame_id / 50, SimpleNamespace(shape=(10, 10, 3))))
             await manager.wait_idle()
         self.assertEqual(len(manager.object_provider.calls), 21)
         self.assertEqual(len(manager.keypoint_provider.calls), 21)
@@ -95,7 +96,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
         gate = asyncio.Event()
         manager = WindowManager(Objects(gate), Faces(), Points())
         for frame_id in range(50):
-            manager.submit(Frame(frame_id, frame_id / 50, None))
+            manager.submit(Frame(frame_id, frame_id / 50, SimpleNamespace(shape=(10, 10, 3))))
             await asyncio.sleep(0)
         self.assertEqual(manager.object_provider.calls, [0])
         gate.set()
@@ -110,7 +111,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
         faces = RetryFaces()
         manager = WindowManager(Objects(), faces, Points())
         for index in range(31):
-            manager.submit(Frame(index, index / 10, None))
+            manager.submit(Frame(index, index / 10, SimpleNamespace(shape=(10, 10, 3))))
             await manager.wait_idle()
         self.assertEqual(faces.calls, [(0, 1), (10, 1)])
         await manager.close()
@@ -131,7 +132,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
         faces = ForgetfulFaces()
         manager = WindowManager(Occluded(), faces, Points())
         for index, timestamp in enumerate((0., .2, 1.2)):
-            manager.submit(Frame(index, timestamp, None))
+            manager.submit(Frame(index, timestamp, SimpleNamespace(shape=(10, 10, 3))))
             await manager.wait_idle()
         self.assertEqual(faces.forgotten, [1])
         self.assertEqual(faces.calls, [(0, 1), (2, 1)])
@@ -141,7 +142,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_continuous_object_results_do_not_imply_a_person_left(self):
         manager = self.manager()
         for index, timestamp in enumerate((0., 1.2, 2.4)):
-            manager.submit(Frame(index, timestamp, None))
+            manager.submit(Frame(index, timestamp, SimpleNamespace(shape=(10, 10, 3))))
             await manager.wait_idle()
         self.assertEqual(manager.face_provider.calls, [(0, 1)])
         await manager.close()
@@ -149,7 +150,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_window_discards_late_results(self):
         gate = asyncio.Event()
         manager = WindowManager(Objects(gate), Faces(), Points(), retained_windows=2)
-        manager.submit(Frame(0, 0., None))
+        manager.submit(Frame(0, 0., SimpleNamespace(shape=(10, 10, 3))))
         await asyncio.sleep(0)
         manager.advance(10.)
         gate.set()
@@ -164,7 +165,7 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
             async def detect(self, frame):
                 raise RuntimeError("offline")
         manager = WindowManager(Broken(), Faces(), Points())
-        manager.submit(Frame(0, 0., None))
+        manager.submit(Frame(0, 0., SimpleNamespace(shape=(10, 10, 3))))
         await manager.wait_idle()
         manager.advance(1.)
         summary = manager.drain_events()[0].summary
@@ -173,24 +174,24 @@ class WindowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_input_validation(self):
         manager = self.manager()
-        manager.submit(Frame(1, 1., None))
+        manager.submit(Frame(1, 1., SimpleNamespace(shape=(10, 10, 3))))
         with self.assertRaises(ValueError):
-            manager.submit(Frame(1, 1.1, None))
+            manager.submit(Frame(1, 1.1, SimpleNamespace(shape=(10, 10, 3))))
         with self.assertRaises(ValueError):
             manager.advance(.5)
         with self.assertRaises(ValueError):
-            Frame(2, float("nan"), None)
+            Frame(2, float("nan"), SimpleNamespace(shape=(10, 10, 3)))
         await manager.close()
         self.assertEqual(manager._windows[1].pending_tasks, 0)
         with self.assertRaises(RuntimeError):
-            manager.submit(Frame(2, 1.2, None))
+            manager.submit(Frame(2, 1.2, SimpleNamespace(shape=(10, 10, 3))))
 
     async def test_network_delay_does_not_reassign_capture_window(self):
         manager = self.manager()
-        manager.submit(Frame(0, .9, None))
+        manager.submit(Frame(0, .9, SimpleNamespace(shape=(10, 10, 3))))
         await manager.wait_idle()
         manager.advance(1.05)
-        manager.submit(Frame(1, 1.01, None))
+        manager.submit(Frame(1, 1.01, SimpleNamespace(shape=(10, 10, 3))))
         await manager.wait_idle()
         manager.advance(2.)
         self.assertEqual(manager.get_window(0)[0].frame_id, 0)

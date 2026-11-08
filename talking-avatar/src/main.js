@@ -10,6 +10,8 @@ import { CLIP_ACTIONS, chooseClip, mountAnimationControls } from "./avatar/clipA
 import { createHeadPitchLimiter } from "./avatar/headPitch.js";
 import { GestureSpeechPacer } from "./avatar/GestureSpeechPacer.js";
 import { AudioGesturePlayer } from "./avatar/AudioGesturePlayer.js";
+import { EmotionTimeline } from "./avatar/EmotionTimeline.js";
+import { MOOD_PREVIEWS, configureMoodPreviews, mountMoodControls } from "./avatar/moodControls.js";
 import { LaughingMouth } from "./avatar/LaughingMouth.js";
 import { GestureTimeline } from "./avatar/GestureTimeline.js";
 import { TalkingGestures } from "./avatar/TalkingGestures.js";
@@ -62,6 +64,7 @@ const clipActions = Object.fromEntries(Object.keys(CLIP_ACTIONS).map((action) =>
 const speechActions = new SpeechActions(() => Boolean(head?.isSpeaking));
 const audioGestures = new AudioGesturePlayer(() => head);
 const laughingMouth = new LaughingMouth(() => head);
+const emotionTimeline = new EmotionTimeline(() => avatarReady ? head : null);
 const gestureSpeechPacer = new GestureSpeechPacer();
 let playbackOptions = { gesture_min_duration_seconds: 2, tts_volume_gain: 1.5 };
 
@@ -266,6 +269,7 @@ const sttManager = new STTManager({
         conversationLog.clearErrors();
         speechGeneration++;
         gestureTimeline.clear();
+        emotionTimeline.clear();
         gestureSpeechPacer.clear();
         audioGestures.clear();
         laughingMouth.clear();
@@ -313,14 +317,13 @@ const sttManager = new STTManager({
                 setSpeechLatency("llm", `transcript → reply + gestures ${formatLatency(elapsedSpeechMs(speechTurnTiming.transcriptAt))}`);
             }
             setSpeechLatency("gesture", `tag parse ${Number(event.gesture_parse_ms || 0).toFixed(2)} ms`);
-            conversationLog.appendGestureTags(event.gesture_tags);
             conversationLog.finishReply(finalizedTimeLabel());
         } else if (event.type === "avatar_action") {
             const actions = { gesture: clipActions };
             const action = actions[event.tool]?.[event.action];
             if (action) speechActions.add(action);
         } else if (event.type === "llm_delta") {
-            conversationLog.appendReplyDelta(event.text);
+            conversationLog.appendReplyDelta(event.raw_text ?? event.text);
         } else if (event.type === "speech") {
             const generation = speechGeneration;
             const receivedAt = performance.now();
@@ -333,6 +336,7 @@ const sttManager = new STTManager({
             speechPlaybackQueue = speechPlaybackQueue.then(() => playSpeechResult(event, generation, receivedAt)).catch((error) => {
                 if (generation !== speechGeneration) return;
                 speechActions.clear();
+                emotionTimeline.clear();
                 console.error("Speech playback failed:", error);
                 setStatus("Speech playback failed.");
             });
@@ -591,6 +595,8 @@ async function playSpeechResult(result, generation, receivedAt = performance.now
                 if (generation !== speechGeneration) return;
                 const gestureScheduleStarted = performance.now();
                 gestureTimeline.schedule(paced.gestures, start, rate);
+                emotionTimeline.schedule(result.emotion, start, duration, rate);
+                emotionTimeline.update(head.audioCtx.currentTime);
                 laughingMouth.scheduleSpeech(paced, start, rate);
                 const gestureScheduleMs = performance.now() - gestureScheduleStarted;
                 talkingGestures.until(start + duration / rate);
@@ -623,6 +629,7 @@ async function playSpeechResult(result, generation, receivedAt = performance.now
 function stopSpeech() {
     speechGeneration++;
     gestureTimeline.clear();
+    emotionTimeline.clear();
     gestureSpeechPacer.clear();
     audioGestures.clear();
     laughingMouth.clear();
@@ -734,6 +741,7 @@ async function initializeAvatar() {
                     // Runs after FBX playback and TalkingHead's additive pose layers.
                     update: () => {
                         if (head?.audioCtx) {
+                            emotionTimeline.update(head.audioCtx.currentTime);
                             gestureTimeline.advance(head.audioCtx.currentTime);
                             audioGestures.update(head.audioCtx.currentTime);
                             cameraResponses.update();
@@ -788,6 +796,7 @@ async function initializeAvatar() {
                 }
             );
 
+        configureMoodPreviews(head);
         await head.lipsyncGetProcessor("en");
 
 
@@ -1136,6 +1145,12 @@ function registerEventHandlers() {
 
 
     mountAnimationControls(document.getElementById("animationControls"), (action) => clipActions[action]());
+    mountMoodControls(document.getElementById("moodControls"), (mood) => {
+        void executeAction(`Emotion: ${MOOD_PREVIEWS[mood]}`, (avatar) => {
+            if (!avatarReady) throw new Error("Your avatar is still loading. Try again in a moment.");
+            avatar.setMood(mood);
+        });
+    });
 
 
 

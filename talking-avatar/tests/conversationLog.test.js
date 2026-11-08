@@ -114,3 +114,15 @@ test("an unavailable conversation panel is safe to update", () => {
     log.finishReply();
   });
 });
+
+test("original delivery tags and markup remain inline as literal text across chunks", () => {
+  const { body, log } = fixture();
+  const chunks = ["[hap", "py][fast][clapping]Great! 👋 ", "[slow][sad]Take care. <b>Literal</b>"];
+  for (const chunk of chunks) log.appendReplyDelta(chunk);
+  log.finishReply();
+  assert.equal(body.children.length, 1);
+  const block = body.children[0];
+  assert.equal(block.children.length, 2); // Label and original text, with no gesture summary.
+  assert.equal(block.children[1].textContent, chunks.join(""));
+  assert.equal(block.children[1].children.length, 0); // Model output is never interpreted as HTML.
+});

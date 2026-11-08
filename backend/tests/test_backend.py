@@ -224,7 +224,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(self.llm.calls[1]), 4)
         self.assertEqual(len(self.llm.calls[2]), 2)
         self.assertTrue(self.llm.calls[0][0]["content"].startswith(settings.system_prompt))
-        self.assertIn("World state", self.llm.calls[0][0]["content"])
+        self.assertIn("Camera observations", self.llm.calls[0][-1]["content"])
         self.assertEqual(first[-1]["text"], "Hello from provider.")
         self.assertEqual(second[-1]["text"], "Hello from provider.")
         self.assertEqual(third[-1]["text"], "Hello from provider.")

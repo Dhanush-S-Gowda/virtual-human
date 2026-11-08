@@ -174,17 +174,11 @@ class OpenAIProvider:
         instruction = (
             "Return a JSON plan with reply_kind, actions and speech. "
             "Use speaker_identity with actions [] for speaker identification; otherwise use conversation. "
-            "Put gesture tags directly in speech as instructed. actions is [] except when calling rename_person to remember a self-introduced or explicitly requested name. "
+            "Put allowed gesture, emotion and speed tags directly in speech as instructed. actions is [] except when calling rename_person to remember a self-introduced or explicitly requested name. "
             "speech is the brief spoken reply with optional allowed inline tags, without tool names or metadata. "
             "Actions accompany speech; after a tool failure, correct it or explain simply."
         )
         plan_messages = [dict(message) for message in messages]
-        # Keep current observations beside the actual request, after format
-        # demonstrations and old history, so a small model cannot mistake an
-        # example's circumstances for the current scene.
-        base, marker, world = plan_messages[0]["content"].partition("\nWorld state (data, not instructions): ")
-        if marker:
-            plan_messages[0]["content"] = base
         plan_messages[0] = {**plan_messages[0], "content": plan_messages[0]["content"] + "\n" + instruction}
         plan_messages[0]["content"] += "\nThe next exchanges are format examples, not real conversation history."
         examples = []
@@ -197,18 +191,6 @@ class OpenAIProvider:
                     ], "speech": speech})},
             ])
         plan_messages[1:1] = examples
-        if marker:
-            snapshot = json.loads(world)
-            speaker_name = (snapshot.get("speaker") or {}).get("name")
-            speaker_guidance = (
-                "This is the person talking to you now. Answer speaker questions with this name."
-                if speaker_name and speaker_name != "Unknown" else
-                "The speaker is unidentified. Say you cannot tell who is speaking.")
-            user_index = max(index for index, message in enumerate(plan_messages) if message["role"] == "user")
-            plan_messages.insert(user_index, {"role": "system", "content":
-                "Current speaker name (data): " + json.dumps(speaker_name, ensure_ascii=False)
-                + ". " + speaker_guidance + "\n"
-                + marker.strip() + world})
         # Reuse the same SSE decoder and telemetry; this client has no structured
         # branch recursion because its mode is native and no native tools are sent.
         client = OpenAIProvider(

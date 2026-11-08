@@ -105,6 +105,9 @@ cv_world_history_seconds: 10.0
 cv_world_history_windows: 0
 cv_keypoint_history_seconds: 3.0
 cv_keypoint_history_samples: 3000
+# Apply to keypoints and new face-recognition attempts; keep all object detections.
+cv_person_max_targets: 2
+cv_person_min_area_ratio: 0.30  # Bounding-box area divided by frame area.
 cv_max_face_tasks: 4
 cv_face_retry_seconds: 1.0  # Retry unusable captures until a valid face is available.
 

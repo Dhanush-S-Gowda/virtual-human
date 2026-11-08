@@ -1,6 +1,7 @@
 """A validated rename persists a face identity, not a temporary tracker ID."""
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,7 +28,13 @@ async def test_tool_rename_rejects_stale_target_and_recognizes_a_new_track_after
     provider._service = IdentityService(store, FaceMatcher(), provider._scene, model_version="test")
     face = {"score": .99, "bbox": (10, 10, 150, 180), "embedding": np.array([1., 0., 0.])}
     provider._detector = SimpleNamespace(detect_faces=lambda *args: [face])
-    service = CVService(Objects(), provider, Points(), settings)
+    class ForegroundObjects(Objects):
+        async def detect(self, frame):
+            detections = await super().detect(frame)
+            return tuple(replace(item, bbox=(0, 0, 640, 480)) if item.label == "person" else item
+                         for item in detections)
+
+    service = CVService(ForegroundObjects(), provider, Points(), settings)
 
     class Client:
         def __init__(self):

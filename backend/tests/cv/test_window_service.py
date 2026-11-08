@@ -30,7 +30,7 @@ async def test_window_boundary_revision_queries_and_source_isolation():
     gate = asyncio.Event()
     config = SimpleNamespace(**{**vars(settings), "cv_window_seconds": .1})
     service = CVService(Objects(gate), Faces(), Points(), config, host="127.0.0.1", port=0)
-    service._decode = lambda body: SimpleNamespace(shape=(480, 640, 3))
+    service._decode = lambda body: SimpleNamespace(shape=(10, 10, 3))
     await service.start()
     try:
         port = service._server.sockets[0].getsockname()[1]
@@ -67,7 +67,7 @@ async def test_empty_detection_clears_scene_and_reconnect_resets_clock():
             return () if frame.frame_id else await super().detect(frame)
 
     service = CVService(Empty(), Faces(), Points(), settings, host="127.0.0.1", port=0)
-    service._decode = lambda body: SimpleNamespace(shape=(480, 640, 3))
+    service._decode = lambda body: SimpleNamespace(shape=(10, 10, 3))
     await service.start()
     try:
         port = service._server.sockets[0].getsockname()[1]

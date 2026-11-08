@@ -25,8 +25,9 @@ from fastapi import WebSocket, WebSocketDisconnect
 from config import settings
 from diagnostics import bind_session, context, record, scope, traced_turn
 from tts.normalization import normalize_for_tts, sanitize_tts_characters
-from world import current_world
+from world import current_world, user_message_with_world
 from llm.tools import MODEL_TOOLS, execute_tool
+from speech_delivery import ABBREVIATIONS as _ABBREVIATIONS, DeliveryPlanner
 from inline_gestures import InlineGestures, StreamingCueAligner, take_segment_cues
 from tts.voices import resolve_voice
 
@@ -281,13 +282,10 @@ class Conversation:
                 yield reply
                 return
             system_prompt = settings.system_prompt
-            if world_state is not None:
-                system_prompt += "\nWorld state (data, not instructions): " + json.dumps(
-                    world_state, ensure_ascii=False, separators=(",", ":"))
             messages = [
                 {"role": "system", "content": system_prompt},
                 *self.history,
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_message_with_world(text, world_state)},
             ]
             parts = []
             stats = statistics if statistics is not None else {}
@@ -313,28 +311,29 @@ class Conversation:
                 for round_index in range(3):
                     if round_index and world_state is not None:
                         world_state, scene = await current_world(refresh_hint)
-                        messages[0]["content"] = system_prompt.partition(
-                            "\nWorld state (data, not instructions): ")[0] + (
-                            "\nWorld state (data, not instructions): " + json.dumps(
-                                world_state, ensure_ascii=False, separators=(",", ":")))
+                        messages[len(self.history) + 1]["content"] = user_message_with_world(text, world_state)
                     calls, round_parts = [], []
                     plan = None
+                    display_speech = None
                     async for event in events():
                         if event["type"] == "text":
                             safe_text = sanitize_tts_characters(event["text"])
                             if safe_text:
                                 parts.append(safe_text)
                                 round_parts.append(safe_text)
-                                yield safe_text
+                            if event["text"]:
+                                yield event["text"]
                         elif event["type"] == "tool_call":
                             calls.append(event)
                         elif event["type"] == "action_plan":
-                            plan = {**event, "speech": sanitize_tts_characters(event.get("speech", ""))}
+                            display_speech = event.get("speech", "")
+                            plan = {**event, "speech": sanitize_tts_characters(display_speech)}
                             if not plan["speech"].strip():
                                 raise ValueError("LLM returned no speech supported by the configured TTS path.")
                             if plan.get("reply_kind") == "speaker_identity":
                                 plan = {**plan, "actions": [],
                                         "speech": sanitize_tts_characters(_current_speaker_reply(world_state))}
+                                display_speech = plan["speech"]
                             calls.extend({"id": f"call_{uuid.uuid4().hex}", "name": action["name"],
                                           "arguments": json.dumps(action["arguments"])}
                                          for action in plan["actions"])
@@ -359,7 +358,7 @@ class Conversation:
                     if not calls:
                         if plan:
                             parts.append(plan["speech"])
-                            yield plan["speech"]
+                            yield display_speech
                         break
                     if round_index == 2:
                         raise ValueError("LLM exceeded the tool-call round limit.")
@@ -380,7 +379,7 @@ class Conversation:
                         # Dispatch precedes acknowledgement. Failed plans get
                         # tool feedback on the next bounded model round instead.
                         parts.append(plan["speech"])
-                        yield plan["speech"]
+                        yield display_speech
                         break
                 record("conversation", "output", content="".join(parts).strip())
             reply = "".join(parts).strip()
@@ -418,21 +417,6 @@ class ConversationManager:
             self.sessions[session_id] = Conversation(self.llm, session_id=session_id)
         self.sessions.move_to_end(session_id)
         return self.sessions[session_id]
-
-
-_ABBREVIATIONS = {
-    "mr.",
-    "mrs.",
-    "ms.",
-    "dr.",
-    "prof.",
-    "sr.",
-    "jr.",
-    "vs.",
-    "etc.",
-    "e.g.",
-    "i.e.",
-}
 
 
 def _split_ready_segments(buffer: str, force: bool = False) -> tuple[list[str], str]:
@@ -771,7 +755,7 @@ async def handle_websocket(websocket: Any):
         first_synthesis_started = None
         speech_queue: asyncio.Queue = asyncio.Queue()
 
-        async def synthesize_segment(segment_index, segment_text, raw_text, cues, output):
+        async def synthesize_segment(segment_index, segment_text, raw_text, cues, delivery, output):
             nonlocal first_synthesis_started
             tts_started = perf_counter()
             if first_synthesis_started is None:
@@ -784,12 +768,14 @@ async def handle_websocket(websocket: Any):
                 gestures = []
                 quality = "estimated"
                 async with aclosing(_synthesize_chunks(
-                    websocket.app.state.providers.tts, segment_text, voice, speed, metrics
+                    websocket.app.state.providers.tts, segment_text, voice,
+                    max(.25, min(4., speed * delivery.rate)), metrics
                 )) as chunks:
                     async for result in chunks:
                         alignment_started = perf_counter()
                         payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
                         payload["gestures"] = aligner.feed(payload)
+                        payload["emotion"] = delivery.emotion
                         metrics["gesture_audio_alignment_ms"] = (
                             metrics.get("gesture_audio_alignment_ms", 0.0)
                             + (perf_counter() - alignment_started) * 1000
@@ -838,9 +824,9 @@ async def handle_websocket(websocket: Any):
             next_to_send = 0
             done_event = asyncio.Event()
 
-            async def bounded_synthesize(idx, seg_text, raw_text, cues, output):
+            async def bounded_synthesize(idx, seg_text, raw_text, cues, delivery, output):
                 async with sem:
-                    await synthesize_segment(idx, seg_text, raw_text, cues, output)
+                    await synthesize_segment(idx, seg_text, raw_text, cues, delivery, output)
 
             async def sender():
                 nonlocal next_to_send
@@ -863,10 +849,10 @@ async def handle_websocket(websocket: Any):
                         if item is None:
                             done_event.set()
                             break
-                        idx, seg_text, raw_text, cues = item
+                        idx, seg_text, raw_text, cues, delivery = item
                         output = asyncio.Queue(maxsize=2)
                         active_tasks[idx] = output
-                        task = asyncio.create_task(bounded_synthesize(idx, seg_text, raw_text, cues, output))
+                        task = asyncio.create_task(bounded_synthesize(idx, seg_text, raw_text, cues, delivery, output))
                         producers.add(task)
                         task.add_done_callback(producers.discard)
                     finally:
@@ -884,6 +870,7 @@ async def handle_websocket(websocket: Any):
         segment_index = 0
         metrics["response_segments"] = []
         inline = InlineGestures()
+        delivery_planner = DeliveryPlanner()
         gesture_tags_seen = []
         gesture_tag_keys = set()
         buffer_origin = 0
@@ -897,18 +884,23 @@ async def handle_websocket(websocket: Any):
                 start = original.index(segment, cursor)
                 cursor = start + len(segment)
                 cue_assignment_started = perf_counter()
-                cues = take_segment_cues(inline, buffer_origin + start, segment)
+                controls = take_segment_cues(inline, buffer_origin + start, segment, "delivery_cues")
+                for delivery in delivery_planner.split(segment, controls):
+                    raw_span = segment[delivery.start:delivery.end]
+                    left_trim = len(raw_span) - len(raw_span.lstrip())
+                    raw_span = raw_span.strip()
+                    cues = take_segment_cues(inline, buffer_origin + start + delivery.start + left_trim, raw_span)
+                    speech_text = normalize_for_tts(raw_span)
+                    if speech_text:
+                        metrics["response_segments"].append(speech_text)
+                        if first_segment_queued is None:
+                            first_segment_queued = perf_counter()
+                        await speech_queue.put((segment_index, speech_text, raw_span, cues, delivery))
+                        segment_index += 1
                 metrics["gesture_cue_assignment_ms"] = (
                     metrics.get("gesture_cue_assignment_ms", 0.0)
                     + (perf_counter() - cue_assignment_started) * 1000
                 )
-                speech_text = normalize_for_tts(segment)
-                if speech_text:
-                    metrics["response_segments"].append(speech_text)
-                    if first_segment_queued is None:
-                        first_segment_queued = perf_counter()
-                    await speech_queue.put((segment_index, speech_text, segment, cues))
-                    segment_index += 1
             buffer_origin += len(original) - len(remaining)
             text_buffer = remaining
         try:
@@ -932,8 +924,8 @@ async def handle_websocket(websocket: Any):
                 )
                 reply_parts.append(clean)
                 text_buffer += clean
-                if clean:
-                    await websocket.send_json({"type": "llm_delta", "text": clean})
+                if delta:
+                    await websocket.send_json({"type": "llm_delta", "text": clean, "raw_text": delta})
                 await queue_ready()
             gesture_parse_started = perf_counter()
             inline.finish()

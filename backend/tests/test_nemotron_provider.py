@@ -94,7 +94,8 @@ async def test_live_socket_audio_precedes_release_and_llm_gets_only_full_transcr
         partial = next(event for event in client.events if event["type"] == "transcript_partial")
         assert partial["text"] == "unstable words"
         assert client.events.index(partial) < client.events.index(transcript)
-        assert llm.calls[0][-1]["content"] == "Hello my name is Alex."
+        assert llm.calls[0][-1]["content"].endswith("User question:\nHello my name is Alex.")
+        assert "unstable words" not in llm.calls[0][-1]["content"]
 
 
 class Socket:

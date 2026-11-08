@@ -48,18 +48,6 @@ export class ConversationLog {
     this.scrollToLatest();
   }
 
-  appendGestureTags(tags) {
-    if (!this.reply || !Array.isArray(tags) || !tags.length) return;
-    let line = this.reply.parentElement?.querySelector?.(".transcript-gestures");
-    if (!line) {
-      line = this.body.ownerDocument.createElement("div");
-      line.className = "transcript-gestures";
-      this.reply.parentElement?.append(line);
-    }
-    line.textContent = `Gestures: ${tags.join(", ")}`;
-    this.scrollToLatest();
-  }
-
   clearErrors() {
     if (!this.body) return;
     for (const error of this.body.querySelectorAll?.(".transcript-error") || []) error.remove();

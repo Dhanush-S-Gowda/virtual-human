@@ -94,6 +94,8 @@ class WindowManager:
         max_face_tasks: int = 4,
         face_retry_seconds: float = 1.0,
         face_reentry_seconds: float = .75,
+        person_max_targets: int = 2,
+        person_min_area_ratio: float = .30,
     ):
         for value in (window_seconds, object_fps, keypoint_fps, history_seconds,
                       face_retry_seconds, face_reentry_seconds):
@@ -101,6 +103,13 @@ class WindowManager:
                 raise ValueError("Window, rates, and history duration must be positive and finite")
         if retained_windows < 1 or history_samples < 1 or max_face_tasks < 1:
             raise ValueError("Retention limits must be positive")
+        if type(person_max_targets) is not int or person_max_targets < 1:
+            raise ValueError("Person target limit must be a positive integer")
+        if (type(person_min_area_ratio) not in (int, float)
+                or not isfinite(person_min_area_ratio) or not 0 <= person_min_area_ratio <= 1):
+            raise ValueError("Person area ratio must be between zero and one")
+        self.person_max_targets = person_max_targets
+        self.person_min_area_ratio = person_min_area_ratio
         self.object_provider = object_provider
         self.face_provider = face_provider
         self.keypoint_provider = keypoint_provider
@@ -146,7 +155,29 @@ class WindowManager:
             max_face_tasks=settings.cv_max_face_tasks,
             face_retry_seconds=getattr(settings, "cv_face_retry_seconds", 1.0),
             face_reentry_seconds=getattr(settings, "cv_face_reentry_seconds", .75),
+            person_max_targets=getattr(settings, "cv_person_max_targets", 2),
+            person_min_area_ratio=getattr(settings, "cv_person_min_area_ratio", .30),
         )
+
+    def select_people(self, frame, tracks):
+        """Select largest in-frame person boxes; unknown dimensions cannot qualify."""
+        shape = getattr(frame.image, "shape", (0, 0))
+        height, width = shape[:2]
+        if width <= 0 or height <= 0:
+            return ()
+        ranked = []
+        for track in tracks:
+            if track.label != "person":
+                continue
+            x1, y1, x2, y2 = track.bbox
+            if not all(isfinite(value) for value in track.bbox):
+                continue
+            area = (max(0., min(width, x2) - max(0., x1))
+                    * max(0., min(height, y2) - max(0., y1)))
+            if area > 0 and area / (width * height) >= self.person_min_area_ratio:
+                ranked.append((area, track))
+        ranked.sort(key=lambda item: (-item[0], item[1].track_id))
+        return tuple(track for _, track in ranked[:self.person_max_targets])
 
     async def initialize(self):
         for provider in (self.object_provider, self.face_provider, self.keypoint_provider):
@@ -310,7 +341,7 @@ class WindowManager:
                 result = tuple(await self.object_provider.detect(frame))
             elif stage == "keypoints":
                 tracks = await dependency if dependency is not None else self._last_objects
-                frame = replace(frame, tracks=tracks or ())
+                frame = replace(frame, tracks=self.select_people(frame, tracks or ()))
                 history = tuple(sorted(
                     (sample for sample in self._history if sample.timestamp <= frame.timestamp),
                     key=lambda sample: sample.timestamp,
@@ -333,6 +364,7 @@ class WindowManager:
                 previous_people = {obj.track_id for obj in self._last_objects if obj.label == "person"}
                 if frame.timestamp >= self._object_timestamp:
                     self._last_objects, self._object_timestamp = result, frame.timestamp
+                selected_ids = {obj.track_id for obj in self.select_people(frame, result)}
                 for obj in result:
                     if obj.label == "person":
                         last_seen = self._seen_people.get(obj.track_id)
@@ -347,7 +379,8 @@ class WindowManager:
                         self._track_generations.setdefault(obj.track_id, frame.frame_id)
                         self._seen_people[obj.track_id] = frame.timestamp
                         identity = self._identities.get(obj.track_id)
-                        if ((identity is None or identity.needs_retry)
+                        if (obj.track_id in selected_ids
+                                and (identity is None or identity.needs_retry)
                                 and f"face:{obj.track_id}" not in self._busy
                                 and frame.timestamp - self._face_attempts.get(obj.track_id, -float("inf"))
                                 >= self.face_retry_seconds):

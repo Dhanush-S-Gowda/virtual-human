@@ -70,8 +70,17 @@
         </div>
         <nav id="avatarActions" aria-label="Avatar actions">
           <details class="moreActions">
-            <summary aria-label="Avatar animations" title="Avatar animations">🎬</summary>
-            <div class="actionMenu" id="animationControls"></div>
+            <summary aria-label="Avatar gestures and emotions" title="Avatar gestures and emotions">🎬</summary>
+            <div class="actionMenu">
+              <div class="actionGroup" role="group" aria-labelledby="gestureControlsLabel">
+                <p class="actionGroupLabel" id="gestureControlsLabel">Gestures</p>
+                <div class="actionButtons" id="animationControls"></div>
+              </div>
+              <div class="actionGroup" role="group" aria-labelledby="moodControlsLabel">
+                <p class="actionGroupLabel" id="moodControlsLabel">Emotions</p>
+                <div class="actionButtons" id="moodControls"></div>
+              </div>
+            </div>
           </details>
         </nav>
       </footer>

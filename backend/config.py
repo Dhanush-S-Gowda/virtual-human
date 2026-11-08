@@ -41,8 +41,16 @@ DEFAULTS = {
     "gesture_min_duration_seconds": 2.0,
     "cv_world_history_seconds": 10.0,
     "cv_world_history_windows": 0,
+    "cv_person_max_targets": 2,
+    "cv_person_min_area_ratio": 0.30,
 }
 config = {**DEFAULTS, **(config or {})}
+
+if type(config["cv_person_max_targets"]) is not int or config["cv_person_max_targets"] < 1:
+    raise ValueError("cv_person_max_targets must be a positive integer.")
+area_ratio = config["cv_person_min_area_ratio"]
+if type(area_ratio) not in (int, float) or not isfinite(area_ratio) or not 0 <= area_ratio <= 1:
+    raise ValueError("cv_person_min_area_ratio must be between zero and one.")
 
 history_seconds = config["cv_world_history_seconds"]
 history_windows = config["cv_world_history_windows"]
