@@ -8,7 +8,8 @@ from typing import Any
 
 import httpx
 
-from diagnostics import record, stage
+from diagnostics import record, stage, measure
+from world import world_request_metrics
 from .tools import ACTION_EXAMPLES, ACTION_PLAN_SCHEMA, validate_action_plan
 
 
@@ -98,7 +99,9 @@ class OpenAIProvider:
         usage, timings = {}, {}
         started = perf_counter()
         first_token = last_token = None
-        record("llm", "request", request_id=request_id, payload=payload)
+        cv_metrics = world_request_metrics()
+        record("llm", "request", request_id=request_id, payload=payload, **cv_metrics)
+        measure("cv_latest_event_age_ms", cv_metrics["cv_latest_event_age_ms"], request_id=request_id)
         status = "ok"
         try:
             with stage("llm.http_stream", request_id=request_id):
@@ -166,6 +169,10 @@ class OpenAIProvider:
             status = "error_or_cancelled"
             raise
         finally:
+            if status == "ok" and first_token is not None:
+                measure("llm_ttft_ms", (first_token - started) * 1000, request_id=request_id)
+            else:
+                measure("llm_ttft_ms", None, status=status if status != "ok" else "no_output", request_id=request_id)
             record("llm", "response", request_id=request_id, status=status,
                    content="".join(response_parts))
 

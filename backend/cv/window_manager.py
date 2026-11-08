@@ -14,6 +14,7 @@ from typing import Any, Callable
 from backend.cv import events
 from backend.config import settings as global_settings
 from backend.diagnostics import record as trace_record
+from backend.diagnostics import measure
 from backend.cv.object_det.state import SceneState
 
 settings = global_settings.cv
@@ -140,6 +141,9 @@ class WindowManager:
         self._next_close: int | None = None
         self.discarded_results = 0
         self._closed = False
+        self._throughput_started = perf_counter()
+        self._throughput_counts = Counter()
+        self._input_dimensions = (0, 0)
 
     @classmethod
     def from_settings(cls, object_provider, face_provider, keypoint_provider, settings):
@@ -213,6 +217,7 @@ class WindowManager:
         cutoff = self.visual_history_cutoff(seconds, windows)
         result = {"mode": "windows" if windows else "seconds", "requested_seconds": seconds,
                   "window_limit": windows, "window_seconds": self.window_seconds,
+                  "latest_observation_timestamp": None,
                   "windows": []}
         if not windows and not seconds:
             return result
@@ -224,6 +229,12 @@ class WindowManager:
             if not frames:
                 continue
             summary = replace(window, frames=frames).summary()
+            observed = [frame.timestamp for frame in frames.values()
+                        if ("objects" in frame.completed
+                            or any(point.gestures for point in frame.keypoints))]
+            if observed:
+                latest = result["latest_observation_timestamp"]
+                result["latest_observation_timestamp"] = max(observed + ([latest] if latest is not None else []))
             gestures, faces = {}, {}
             for frame in sorted(frames.values(), key=lambda item: item.timestamp):
                 faces.update({face.track_id: face for face in frame.faces})
@@ -312,6 +323,8 @@ class WindowManager:
         if index < self._next_close:
             window.closed = True
         shape = getattr(frame.image, "shape", (0, 0))
+        self._input_dimensions = (int(shape[1]), int(shape[0]))
+        self._throughput_counts["input_frames"] += 1
         window.frames[frame.frame_id] = FrameRecord(
             frame.frame_id, frame.timestamp, width=int(shape[1]), height=int(shape[0]),
         )
@@ -322,8 +335,36 @@ class WindowManager:
                 task = self._schedule(stage, frame, index, dependency=dependency)
                 if stage == "objects":
                     dependency = task
+            elif stage in self._busy:
+                self._throughput_counts[stage + "_busy_skipped"] += 1
+            else:
+                self._throughput_counts[stage + "_rate_skipped"] += 1
         if window.closed:
             self._publish(window)
+
+    def throughput_sample(self, now=None):
+        """Completion counters are independent of revised frame/window publications."""
+        now = perf_counter() if now is None else now
+        elapsed = now - self._throughput_started
+        if elapsed < 2.:
+            return None
+        counts = self._throughput_counts.copy()
+        self._throughput_counts.clear()
+        self._throughput_started = now
+        inputs = counts["input_frames"]
+        result = {"interval_seconds": elapsed, "input_frames": inputs,
+                  "input_fps": inputs / elapsed, "image_width": self._input_dimensions[0],
+                  "image_height": self._input_dimensions[1]}
+        for stage, label, target in (("objects", "object", self.object_fps),
+                                     ("keypoints", "keypoint", self.keypoint_fps)):
+            result.update({label + "_fps": counts[stage + "_completed"] / elapsed,
+                           label + "_target_fps": target,
+                           label + "_busy_skip_percent": counts[stage + "_busy_skipped"] / inputs * 100 if inputs else None,
+                           label + "_completed": counts[stage + "_completed"],
+                           label + "_errors": counts[stage + "_errors"],
+                           label + "_rate_skipped": counts[stage + "_rate_skipped"]})
+        result["keypoint_no_person"] = counts["keypoints_no_person"]
+        return result
 
     def _schedule(self, stage, frame, index, person=None, dependency=None):
         window = self._windows[index]
@@ -351,6 +392,10 @@ class WindowManager:
                 result = (await self.face_provider.recognize(frame, person),)
                 if result[0].track_id != person.track_id:
                     raise ValueError("Face provider returned a different person track")
+            if stage == "keypoints" and not frame.tracks:
+                self._throughput_counts["keypoints_no_person"] += 1
+            else:
+                self._throughput_counts[stage + "_completed"] += 1
             window = self._windows.get(index)
             if window is None:
                 self.discarded_results += 1
@@ -406,6 +451,7 @@ class WindowManager:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._throughput_counts[stage + "_errors"] += 1
             window = self._windows.get(index)
             if window is not None:
                 record = window.frames[frame.frame_id]
@@ -803,6 +849,13 @@ class CVService(VirtualHumanAdapter):
             now = asyncio.get_running_loop().time()
             self.manager.advance(max(self.manager._watermark,
                                      self._source_origin + now - self._clock_origin))
+            throughput = self.manager.throughput_sample()
+            if throughput and self._owner is not None:
+                trace_record("cv", "throughput", source_id=self._source_id, **throughput)
+                for metric in ("object_fps", "keypoint_fps"):
+                    measure(metric, throughput[metric], "FPS", source_id=self._source_id,
+                            interval_seconds=throughput["interval_seconds"],
+                            image_width=throughput["image_width"], image_height=throughput["image_height"])
             prune = getattr(self.providers[1], "prune", None)
             if prune:
                 prune(set(self.manager._seen_people))
@@ -870,12 +923,24 @@ class CVService(VirtualHumanAdapter):
             getattr(self.settings, "cv_world_history_seconds", 10.),
             getattr(self.settings, "cv_world_history_windows", 0))
         record = self._latest_objects
-        if record is None or self.manager._watermark - record.timestamp > 1.:
+        # Convert the source capture clock using the existing server clock
+        # anchor. Include elapsed time since the last tick when capture stalls.
+        source_now = self.manager._watermark
+        if self._clock_origin is not None:
+            source_now = max(source_now, self._source_origin
+                             + asyncio.get_running_loop().time() - self._clock_origin)
+        latest = history["latest_observation_timestamp"]
+        current_available = record is not None and self.manager._watermark - record.timestamp <= 1.
+        if current_available:
+            self._prune_gestures()
+            candidates = [record.timestamp, *self._recent_gestures.values()]
+            latest = max(candidates + ([latest] if latest is not None else []))
+        observed_at = time.time() - max(0., source_now - latest) if latest is not None else None
+        if not current_available:
             return {"people": [], "objects": [], "active_speaker": None, "windows": self._summaries(),
                     "frame_available": False, "source_id": self._source_id,
-                    "recent_visual_history": history}
+                    "recent_visual_history": history, "latest_visual_observation_at": observed_at}
         scene = self.frame_metadata(record)
-        self._prune_gestures()
         for person in scene["people"]:
             person["actions"] = tuple(sorted(
                 gesture for (track_id, generation, gesture) in self._recent_gestures
@@ -892,6 +957,7 @@ class CVService(VirtualHumanAdapter):
         scene.update(active_speaker=None, windows=self._summaries(), updated_at=time.time(),
                      frame_available=True, source_id=self._source_id,
                      recent_visual_history=history,
+                     latest_visual_observation_at=observed_at,
                      gesture_window_seconds=self.manager._watermark - self._gesture_cutoff())
         return scene
 

@@ -142,6 +142,7 @@ def run(seconds=30., interval=1., output=None, pids=()):
     if output:
         raise ValueError("File logging is disabled. Resource samples are exported to OpenObserve.")
     from backend.observability import emit, setup
+    from backend.resource_metrics import GPUCollector, host_samples
     setup("resource_monitor")
     roles = discover_processes(settings)
     expected_roles = {"backend", "cv"}
@@ -168,11 +169,17 @@ def run(seconds=30., interval=1., output=None, pids=()):
     for sampler in samplers:
         sampler.sample(started)
     totals = {}
+    psutil.cpu_percent(interval=None, percpu=True)
+    gpu = GPUCollector()
     try:
         while seconds == 0 or time.monotonic() - started < seconds:
             remaining = seconds - (time.monotonic() - started) if seconds else interval
             time.sleep(min(interval, max(0., remaining)))
             now = time.monotonic()
+            for sample in host_samples():
+                emit("resources", sample)
+            for sample in gpu.sample(roles):
+                emit("resources", sample)
             for sampler in samplers:
                 try:
                     sample = sampler.sample(now)
@@ -183,6 +190,8 @@ def run(seconds=30., interval=1., output=None, pids=()):
                      "_timestamp": time.time_ns() // 1000, "event": "external_process_resource"})
     except KeyboardInterrupt:
         pass
+    finally:
+        gpu.close()
     report = {"logical_cpus": psutil.cpu_count(), "physical_cores": psutil.cpu_count(logical=False),
               "duration_seconds": time.monotonic() - started,
               "cpu_percent_basis": "100 percent = one logical CPU",

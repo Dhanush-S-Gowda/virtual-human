@@ -4,11 +4,39 @@ import asyncio
 import json
 import uuid
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from math import isclose
+from time import perf_counter, time
 
 import websockets
 
 from config import settings
+from diagnostics import record, measure
+
+
+_request_scene = ContextVar("cv_request_scene", default=None)
+
+
+@contextmanager
+def world_request_context(scene):
+    """Keep telemetry local to this model round, outside the model prompt."""
+    token = _request_scene.set(scene)
+    try:
+        yield
+    finally:
+        _request_scene.reset(token)
+
+
+def world_request_metrics():
+    """Evaluate observation age when a model request is assembled."""
+    scene = _request_scene.get() or {}
+    observed_at = scene.get("latest_visual_observation_at")
+    return {
+        "cv_world_state_fetch_ms": scene.get("cv_world_state_fetch_ms"),
+        "cv_latest_event_age_ms": (
+            round(max(0., time() - observed_at) * 1000, 3) if observed_at is not None else None),
+    }
 
 
 async def cv_request(kind, **fields):
@@ -16,6 +44,7 @@ async def cv_request(kind, **fields):
     if not url:
         raise ValueError("The CV service is not configured.")
     request_id = str(uuid.uuid4())
+    started = perf_counter()
     async with asyncio.timeout(2):
         async with websockets.connect(url, open_timeout=1, close_timeout=.2) as socket:
             await socket.send(json.dumps({"type": kind, "request_id": request_id, **fields}))
@@ -24,6 +53,12 @@ async def cv_request(kind, **fields):
                 if message.get("request_id") == request_id:
                     if message.get("type") == "error":
                         raise ValueError(message.get("message", "CV request failed."))
+                    if kind == "get_scene":
+                        elapsed_ms = round((perf_counter() - started) * 1000, 3)
+                        message["cv_world_state_fetch_ms"] = elapsed_ms
+                        record("cv", "world_state_fetch", request_id=request_id,
+                               cv_world_state_fetch_ms=elapsed_ms)
+                        measure("cv_world_state_fetch_ms", elapsed_ms, request_id=request_id)
                     return message
 
 
@@ -31,7 +66,8 @@ async def current_world(speaker_hint=None):
     """Use a fresh server snapshot; never turn missing camera data into an empty scene."""
     try:
         response = await cv_request("get_scene")
-        scene = response.get("data", {})
+        scene = {**response.get("data", {}),
+                 "cv_world_state_fetch_ms": response.get("cv_world_state_fetch_ms")}
     except (OSError, ValueError, TimeoutError, websockets.WebSocketException):
         return {"status": "unavailable", "people": [], "objects": [], "speaker": None}, {}
     history = {"recent_visual_history": scene["recent_visual_history"]} if "recent_visual_history" in scene else {}

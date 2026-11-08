@@ -11,6 +11,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx
 from observability import STREAMS, credentials, redact, emit, shutdown, resource_sample
+from research_dashboard import merge_research_dashboard
 import psutil
 import os
 
@@ -61,9 +62,59 @@ def dashboards():
     ]
     rows = [row for _, _, group in specs for row in group]
     panels = [panel(i, *row[:3], metric=row[3] if len(row) > 3 else None) for i, row in enumerate(rows)]
-    yield {"version": 8, "title": "Virtual Human",
+    yield merge_research_dashboard({"version": 8, "title": "Virtual Human",
            "description": "CV, STT, LLM, TTS, pipeline events, application logs, and model/process CPU and RAM. CPU 100% is one logical core; RSS includes runtime and shared pages.",
-           "tabs": [{"tabId": "main", "name": "Overview", "panels": panels}]}
+           "tabs": [{"tabId": "main", "name": "Overview", "panels": panels}]}, panel)
+
+
+def initialize_research_streams(client, api):
+    """Establish query field types without creating measured research samples."""
+    common = {"_timestamp": time.time_ns() // 1000, "event": "schema_initialized",
+              "host": "setup", "experiment_id": "setup", "phase": "setup"}
+    performance = {**common, "sample_id": "schema", "metric": "schema", "unit": "ms", "value": 0.,
+                   "provider": "setup", "model": "setup", "phase": "setup", "status": "setup",
+                   "timing_boundary": "setup", "measurement_source": "setup",
+                   "image_width": 0, "image_height": 0, "people_count": 0}
+    resources = {**common, "task": "setup", "resource_scope": "setup", "gpu_status": "setup",
+                 "gpu_name": "setup", "gpu_id": "setup", "gpu_detail": "setup", "pid": 0,
+                 **{key: 0. for key in ("host_cpu_percent", "core_cpu_percent", "cpu_pressure_percent",
+                    "host_ram_percent", "gpu_busy_percent", "gpu_engine_percent", "vram_used_mib",
+                    "vram_total_mib", "vram_used_percent", "gpu_resident_mib", "process_vram_mib")}}
+    cv = {**common, "source_id": "setup", **{key: 0. for key in (
+        "object_fps", "object_target_fps", "keypoint_fps", "keypoint_target_fps",
+        "object_busy_skip_percent", "keypoint_busy_skip_percent")}}
+    for stream, entry in (("vh_performance", performance), ("vh_resources", resources), ("vh_cv", cv)):
+        ingest(client, f"{api}/{stream}/_json", [entry])
+
+
+def validate_research_queries(client, api, dashboard):
+    """Check every new saved query against this OpenObserve instance."""
+    now = time.time_ns() // 1000
+    for tab in dashboard["tabs"]:
+        if tab.get("tabId") != "performance":
+            continue
+        for item in tab["panels"]:
+            response = client.post(f"{api}/_search", json={"query": {
+                "sql": item["queries"][0]["query"], "start_time": now - 86_400_000_000,
+                "end_time": now + 1_000_000, "from": 0, "size": 1000}})
+            if response.is_error or response.json().get("is_partial"):
+                raise RuntimeError(f"Research query failed: {item['title']}: {response.text[:1000]}")
+            print(f"Verified research panel: {item['title']}")
+
+
+def panel_contract(dashboard):
+    """The server adds defaults; compare saved chart behavior, not optional fields."""
+    def axes(query):
+        fields = query["fields"]
+        return {axis: [{key: entry.get(key) for key in ("alias", "column", "label")}
+                       for entry in fields.get(axis, [])] for axis in ("x", "y", "z", "breakdown")}
+
+    return [(tab["tabId"], tab["name"], [
+        {"id": item["id"], "title": item["title"], "type": item["type"],
+         "layout": {key: item["layout"][key] for key in ("x", "y", "w", "h")},
+         "queries": [(query["query"], axes(query)) for query in item["queries"]],
+         "dynamic_columns": item.get("config", {}).get("table_dynamic_columns", False)}
+        for item in tab["panels"]]) for tab in dashboard["tabs"]]
 
 
 def ingest(client, url, entries):
@@ -89,7 +140,7 @@ def dashboard_content(data):
     return data.get("v8", data)
 
 
-def run(migrate=False, check=False, verify=False, consolidate=False, repair_tables=False):
+def run(migrate=False, check=False, verify=False, consolidate=False, repair_tables=False, update_research=False):
     base = os.getenv("OPENOBSERVE_URL", "http://localhost:5080").rstrip("/")
     org = os.getenv("OPENOBSERVE_ORG", "default")
     api = f"{base}/api/{org}"
@@ -102,6 +153,30 @@ def run(migrate=False, check=False, verify=False, consolidate=False, repair_tabl
             return
         managed = [dashboard_content(item) for item in data.get("dashboards", [])]
         managed = [item for item in managed if item.get("title") == "Virtual Human"]
+        if update_research:
+            if len(managed) != 1:
+                raise RuntimeError("Expected exactly one Virtual Human dashboard")
+            identifier = managed[0]["dashboardId"]
+            saved_response = client.get(f"{api}/dashboards/{identifier}", params={"folder": "default"})
+            saved_response.raise_for_status()
+            saved = saved_response.json()
+            updated = merge_research_dashboard(dashboard_content(saved), panel)
+            initialize_research_streams(client, api)
+            validate_research_queries(client, api, updated)
+            params = {"folder": "default"}
+            current_hash = saved.get("hash") or saved_response.headers.get("etag")
+            if current_hash:
+                params["hash"] = current_hash
+            response = client.put(f"{api}/dashboards/{identifier}", params=params, json=updated)
+            response.raise_for_status()
+            response = client.get(f"{api}/dashboards/{identifier}", params={"folder": "default"})
+            response.raise_for_status()
+            actual = dashboard_content(response.json())
+            if panel_contract(actual) != panel_contract(updated):
+                raise RuntimeError("Saved research panels differ from the requested dashboard")
+            validate_research_queries(client, api, actual)
+            print("Updated Performance tab; existing Overview preserved")
+            return
         if repair_tables or verify:
             if len(managed) != 1:
                 raise RuntimeError("Expected exactly one Virtual Human dashboard")
@@ -177,6 +252,7 @@ def run(migrate=False, check=False, verify=False, consolidate=False, repair_tabl
             "task": "setup", "cpu_percent": 0., "rss_mib": 0., "uss_mib": 0.}])
         ingest(client, f"{api}/vh_stages/_json", [{"_timestamp": now, "event": "schema_initialized",
             "stage": "setup", "duration_ms": 0.}])
+        initialize_research_streams(client, api)
         for dashboard in dashboards():
             identifier = existing.get(dashboard["title"])
             if identifier:
@@ -251,5 +327,6 @@ if __name__ == "__main__":
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--consolidate", action="store_true")
     parser.add_argument("--repair-tables", action="store_true")
+    parser.add_argument("--update-research", action="store_true", help="Update Performance panels, preserving Overview")
     args = parser.parse_args()
-    run(args.migrate_logs, args.check, args.verify, args.consolidate, args.repair_tables)
+    run(args.migrate_logs, args.check, args.verify, args.consolidate, args.repair_tables, args.update_research)

@@ -310,7 +310,8 @@ const sttManager = new STTManager({
         } else if (event.type === "transcript") {
             if (speechTurnTiming?.releaseAt != null) {
                 speechTurnTiming.transcriptAt = performance.now();
-                setSpeechLatency("transcript", `release → transcript ${formatLatency(elapsedSpeechMs(speechTurnTiming.releaseAt))}`);
+                const elapsed = event.release_to_transcript_ms ?? elapsedSpeechMs(speechTurnTiming.releaseAt);
+                setSpeechLatency("transcript", `release → transcript ${formatLatency(elapsed)}`);
             }
         } else if (event.type === "llm_complete") {
             if (speechTurnTiming?.transcriptAt != null) {

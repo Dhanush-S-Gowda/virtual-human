@@ -944,6 +944,14 @@ LLM processing; it still uses the selected TTS provider.
 
 ## Metrics and diagnostics
 
+The OpenObserve **Virtual Human → Performance** tab has a **Performance Summary**
+table with sample counts, errors, mean, median, P95, and P99. It also shows host
+and per-core CPU use, CPU pressure, GPU/VRAM measurements where available, and
+achieved CV throughput versus configured limits. See
+[Research dashboard](docs/research-dashboard.md) for measurement boundaries,
+experiment filters, GPU portability, and setup commands. Restart the backend
+and CV service to collect the new raw research measurements.
+
 In host development, turn summaries are written to `backend/metrics.csv`. In
 Compose they are written to the host-mounted
 `backend/metrics-data/metrics.csv`. The compact CSV records model names,
@@ -959,6 +967,41 @@ send traces and resource/process observations to OpenObserve using
 `OPENOBSERVE_URL`, `OPENOBSERVE_ORG`, `OPENOBSERVE_USER`, and
 `OPENOBSERVE_PASSWORD` (or `OPENOBSERVE_TOKEN`). OpenObserve is optional; if it
 is missing or unconfigured, core speech and conversation behavior continues.
+
+OpenObserve model request records (`vh_llm`, event `request`) and conversation
+context records (`vh_conversation`, event `world_context`) include these fields:
+
+| Field | Definition |
+| --- | --- |
+| `cv_world_state_fetch_ms` | WebSocket connection, world-state request, and receipt of the matching response, in milliseconds. Excludes socket close, report formatting, and LLM inference. |
+| `cv_latest_event_age_ms` | Age of the newest visual observation included in the report when the model request is assembled, in milliseconds. Uses the observation's capture time, including retained history when the current scene is unavailable. |
+
+The fields are null when their measurement is unavailable. A completed empty
+object detection counts as an observation; a frame awaiting analysis does not.
+Each tool round uses its refreshed report. Each actual model request, including
+structured-plan retries, measures age again. These fields are for OpenObserve
+only; they are not added to the CSV or model prompt. Existing dynamic dashboard
+tables show the columns after new records arrive.
+
+Camera capture timestamps use the browser's clock. The CV service maps that
+clock to elapsed server time using the first received frame, then provides a
+Unix observation timestamp. The API uses this timestamp to include transport
+and assembly delays in the age. This mapping does not measure initial
+browser-to-CV transport delay. CV and API hosts must have synchronized clocks.
+
+The CV service records frame/keypoint updates, revised window summaries, and
+identity events through `diagnostics.record("cv", ...)` into `vh_cv`. World-state
+fetches also produce a `world_state_fetch` event with their fetch duration.
+Object, face, and keypoint inference spans go to `vh_stages`. Process CPU and
+memory samples go to `vh_resources`; Python logs and exceptions go to
+`vh_application`. Structured records require `diagnostics_enabled`.
+
+Each process sends records through the OpenObserve exporter in a background
+thread. It redacts credentials, queues up to 512 records, batches up to 100,
+and posts JSON to `/api/{org}/{stream}/_json` with the configured credentials.
+Full queues drop records. Ingestion failures are retried up to three times;
+after the final failure, remote logging is disabled for that process. There is
+no local log spool. The dashboard reads these streams through SQL queries.
 
 Useful log commands:
 

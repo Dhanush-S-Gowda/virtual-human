@@ -7,12 +7,14 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from config import settings
 from llm.openai import OpenAIProvider
 from pipeline import ConversationManager, handle_websocket
 from stt.faster_whisper import FasterWhisperProvider
 from stt.nemotron import NemotronProvider
+from stt_metrics import TranscriptMeasurements
 from tts.kokoro import KokoroProvider
 from tts.supertonic import SupertonicProvider
 from tts.voices import VOICES, DEFAULT_VOICES
@@ -50,6 +52,11 @@ def build_providers():
     except KeyError as exc:
         raise ValueError(f"Unknown provider: {exc.args[0]}") from exc
     return SimpleNamespace(llm=llm, tts=tts, stt=stt)
+
+
+class TranscriptReceipt(BaseModel):
+    measurement_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    elapsed_ms: float = Field(ge=0, allow_inf_nan=False)
 
 
 def create_app(providers=None):
@@ -90,10 +97,11 @@ def create_app(providers=None):
         title="Virtual Human Conversation Backend",
         lifespan=lifespan,
     )
+    application.state.transcript_measurements = TranscriptMeasurements()
     application.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"https?://[^/]+$",
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -113,6 +121,11 @@ def create_app(providers=None):
     @application.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         await handle_websocket(websocket)
+
+    @application.post("/telemetry/stt")
+    async def transcript_receipt(receipt: TranscriptReceipt):
+        return {"accepted": application.state.transcript_measurements.receive(
+            receipt.measurement_id, receipt.elapsed_ms)}
 
     return application
 

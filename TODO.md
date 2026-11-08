@@ -1,0 +1,5 @@
+- [ ] Clarify the performed gesture, recognition feedback, and timing.
+- [ ] Verify the detection-to-history-to-LLM report path with focused tests.
+- [ ] Identify a supported cause or the missing evidence needed to reproduce it.
+- [ ] Apply and verify a focused fix if a defect is established.
+- [ ] Report findings and remove this checklist when the task is complete.

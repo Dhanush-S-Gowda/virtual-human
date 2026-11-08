@@ -14,6 +14,9 @@ export class STTManager {
     constructor(options = {}) {
         const endpoint = (options.endpoint || import.meta.env.VITE_BACKEND_URL || "http://localhost:8000").replace(/\/+$/, "");
         this.websocketUrl = endpoint.replace(/^http/, "ws") + "/ws";
+        this.sttTelemetryUrl = endpoint + "/telemetry/stt";
+        this.now = options.now || (() => performance.now());
+        this.releaseStartedAt = null;
         this.onStateChange = options.onStateChange || (() => {});
         this.onTranscript = options.onTranscript || (() => {});
         this.onError = options.onError || (() => {});
@@ -46,6 +49,7 @@ export class STTManager {
     async startRecording() {
         if (this.isRecording() || this.starting) return false;
         this.starting = true;
+        this.releaseStartedAt = null;
         const generation = ++this.captureGeneration;
         try {
             const startOptions = await this.getStartOptions();
@@ -81,8 +85,10 @@ export class STTManager {
             if (generation !== this.captureGeneration) return false;
             socket.onmessage = ({ data }) => {
                 if (this.socket !== socket) return;
+                const receivedAt = this.now();
                 try {
                     const event = JSON.parse(data);
+                    if (event.type === "transcript") this._recordTranscriptTiming(event, receivedAt);
                     this.onEvent(event);
                     if (event.type === "transcript") this.onTranscript(event);
                     if (event.type === "error") {
@@ -158,6 +164,8 @@ export class STTManager {
             return false;
         }
         if (!this.isRecording()) return false;
+        // Start at release, before worklet flushing, transport, or STT finalization.
+        this.releaseStartedAt = this.now();
         this.setState(STTState.TRANSCRIBING);
         try {
             await new Promise((resolve, reject) => {
@@ -179,6 +187,7 @@ export class STTManager {
     }
 
     cancelRecording() {
+        this.releaseStartedAt = null;
         this.captureGeneration++;
         this.starting = false;
         if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: "cancel" }));
@@ -191,6 +200,22 @@ export class STTManager {
     _stopTracks() {
         this.stream?.getTracks().forEach((track) => track.stop());
         this.stream = null;
+    }
+
+    _recordTranscriptTiming(event, receivedAt) {
+        if (event.type !== "transcript" || this.releaseStartedAt === null) return;
+        const elapsedMs = Math.max(0, receivedAt - this.releaseStartedAt);
+        this.releaseStartedAt = null;
+        event.release_to_transcript_ms = elapsedMs;
+        if (!event.stt_measurement_id) return;
+        void fetch(this.sttTelemetryUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ measurement_id: event.stt_measurement_id, elapsed_ms: elapsedMs }),
+            keepalive: true,
+        }).then((response) => {
+            if (!response.ok) throw new Error(`STT timing report failed (${response.status}).`);
+        }).catch((error) => console.warn("Unable to report STT timing:", error));
     }
 
     _stopCapture() {

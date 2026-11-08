@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from functools import wraps
 import json
 import logging
+from math import isfinite
 import os
 from pathlib import Path
 import threading
@@ -24,6 +25,34 @@ except ImportError:
 
 
 context = ContextVar("diagnostic_context", default={})
+
+
+def measure(metric, value, unit="ms", *, status="ok", **fields):
+    """One raw research sample; never substitute zero for missing work."""
+    if not getattr(settings, "diagnostics_enabled", False):
+        return
+    valid = isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value) and value >= 0
+    if not valid and status == "ok":
+        return
+    category = ("stt" if metric.startswith("stt_") else "llm" if metric.startswith("llm_")
+                else "tts" if metric.startswith("tts_") else "cv" if metric.startswith(("cv_", "object_", "keypoint_"))
+                else "gesture")
+    provider = getattr(settings, f"{category}_provider", category)
+    model = getattr(settings, f"{category}_model", "")
+    if category == "stt":
+        model = settings.nemotron_model if provider == "nemotron" else settings.faster_whisper_model
+    elif metric.startswith("object_"):
+        provider, model = "yolo", settings.cv.detection.model
+    elif metric.startswith("keypoint_"):
+        provider = "mediapipe"
+        model = " / ".join((settings.cv.keypoints.pose_model, settings.cv.keypoints.face_model,
+                            settings.cv.keypoints.hand_model))
+    elif category == "tts" and provider == "supertonic":
+        model = "supertonic-3"
+    record("performance", "measurement", metric=metric, value=float(value) if valid else None,
+           status=status, unit=unit,
+           sample_id=str(uuid.uuid4()), provider=provider, model=model,
+           phase=os.getenv("VH_MEASUREMENT_PHASE", "measured"), **fields)
 
 
 def current_cpu(tid=None):
@@ -75,10 +104,14 @@ def stage(name, **fields):
         status = "error_or_cancelled"
         raise
     finally:
+        duration_ms = (time.perf_counter() - started) * 1000
         record("stages", "end", stage=name, status=status,
-               duration_ms=round((time.perf_counter() - started) * 1000, 3),
+               duration_ms=round(duration_ms, 3),
                calling_thread_cpu_ms=round((time.thread_time() - cpu_started) * 1000, 3),
                start_logical_cpu=first_cpu, end_logical_cpu=current_cpu(), **fields)
+        metric = {"cv.object_detection": "object_detection_ms", "cv.keypoint_detection": "keypoint_estimation_ms"}.get(name)
+        if metric and (name != "cv.keypoint_detection" or fields.get("people_count", 0)):
+            measure(metric, duration_ms if status == "ok" else None, status=status, **fields)
 
 
 def traced_stage(name):
@@ -88,6 +121,10 @@ def traced_stage(name):
         def wrapped(*args, **kwargs):
             frame = args[1] if len(args) > 1 and hasattr(args[1], "frame_id") else None
             fields = {"frame_id": frame.frame_id, "capture_timestamp": frame.timestamp} if frame else {}
+            if frame:
+                shape = getattr(frame.image, "shape", (0, 0))
+                fields.update(image_width=int(shape[1]), image_height=int(shape[0]),
+                              people_count=len(getattr(frame, "tracks", ())))
             with stage(name, **fields):
                 return function(*args, **kwargs)
         return wrapped

@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import queue
+import socket
 import sys
 import threading
 import time
@@ -20,7 +21,7 @@ import psutil
 load_dotenv(Path(__file__).with_name(".env"))
 STREAMS = {"cv": "vh_cv", "stages": "vh_stages", "conversation": "vh_conversation",
            "llm": "vh_llm", "stt": "vh_stt", "tts": "vh_tts",
-           "resources": "vh_resources", "application": "vh_application"}
+           "resources": "vh_resources", "application": "vh_application", "performance": "vh_performance"}
 
 
 def enabled():
@@ -70,7 +71,9 @@ class Exporter:
             return
         try:
             self.queue.put_nowait((STREAMS.get(kind, STREAMS["application"]),
-                {**redact(payload), "exporter_dropped_total": self.dropped}))
+                {"host": socket.gethostname(), "experiment_id": os.getenv("VH_EXPERIMENT_ID", "default"),
+                 "phase": os.getenv("VH_MEASUREMENT_PHASE", "measured"),
+                 **redact(payload), "exporter_dropped_total": self.dropped}))
         except queue.Full:
             self.dropped += 1
 
@@ -228,28 +231,44 @@ class ResourceReporter:
                 print("OpenObserve resource reporting could not start; application processes continue.", file=sys.stderr)
 
     def _run(self):
+        try:
+            from .resource_metrics import GPUCollector, host_samples, process_roles
+        except ImportError:
+            from resource_metrics import GPUCollector, host_samples, process_roles
         process = psutil.Process()
         process.cpu_percent(None)
+        host_collector = self.role == "conversation_api"
+        if host_collector:
+            psutil.cpu_percent(interval=None, percpu=True)
+        gpu = GPUCollector()
         external = {}
         ticks = 0
-        while not self.stop_event.wait(2):
-            if _exporter is not None and _exporter.disabled:
-                return
-            try:
-                emit("resources", resource_sample(process, self.role))
-                if self.role == "conversation_api":
-                    if ticks % 5 == 0:
-                        external = self._external_processes(external)
-                    for pid, (task, service_process) in list(external.items()):
-                        try:
-                            sample = resource_sample(service_process, task)
-                            sample["memory_scope"] = "external_listener_process"
+        try:
+            while not self.stop_event.wait(2):
+                if _exporter is not None and _exporter.disabled:
+                    return
+                try:
+                    emit("resources", resource_sample(process, self.role))
+                    if host_collector:
+                        for sample in host_samples():
                             emit("resources", sample)
-                        except psutil.Error:
-                            external.pop(pid, None)
-                    ticks += 1
-            except psutil.Error:
-                return
+                        if ticks % 5 == 0:
+                            external = self._external_processes(external)
+                        for pid, (task, service_process) in list(external.items()):
+                            try:
+                                sample = resource_sample(service_process, task)
+                                sample["memory_scope"] = "external_listener_process"
+                                emit("resources", sample)
+                            except psutil.Error:
+                                external.pop(pid, None)
+                        ticks += 1
+                    for sample in gpu.sample(process_roles(process, self.role, external),
+                                             devices=host_collector):
+                        emit("resources", sample)
+                except (psutil.Error, OSError, ValueError):
+                    continue
+        finally:
+            gpu.close()
 
     @staticmethod
     def _external_processes(previous):

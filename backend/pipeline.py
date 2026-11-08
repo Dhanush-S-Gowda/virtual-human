@@ -23,9 +23,10 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from config import settings
-from diagnostics import bind_session, context, record, scope, traced_turn
+from diagnostics import bind_session, context, record, scope, traced_turn, measure
+from stt_metrics import STT_TIMING_BOUNDARY, TranscriptMeasurements
 from tts.normalization import normalize_for_tts, sanitize_tts_characters
-from world import current_world, user_message_with_world
+from world import current_world, user_message_with_world, world_request_context, world_request_metrics
 from llm.tools import MODEL_TOOLS, execute_tool
 from speech_delivery import ABBREVIATIONS as _ABBREVIATIONS, DeliveryPlanner
 from inline_gestures import InlineGestures, StreamingCueAligner, take_segment_cues
@@ -298,13 +299,15 @@ class Conversation:
                             "method": "lip_motion" if "lip_motion" in observed_speaker.get("evidence", "")
                             else "single_visible"}
             async def events():
-                event_stream = getattr(self.llm, "stream_events", None)
-                if event_stream:
-                    async for event in event_stream(messages, tools=MODEL_TOOLS):
-                        yield event
-                else:
-                    async for part in self.llm.stream_chat(messages):
-                        yield {"type": "text", "text": part}
+                with world_request_context(scene):
+                    record("conversation", "world_context", **world_request_metrics())
+                    event_stream = getattr(self.llm, "stream_events", None)
+                    if event_stream:
+                        async for event in event_stream(messages, tools=MODEL_TOOLS):
+                            yield event
+                    else:
+                        async for part in self.llm.stream_chat(messages):
+                            yield {"type": "text", "text": part}
 
             with scope(session_id=self.session_id, turn_id=context.get().get("turn_id") or str(uuid.uuid4())):
                 record("conversation", "input", messages=messages)
@@ -315,46 +318,47 @@ class Conversation:
                     calls, round_parts = [], []
                     plan = None
                     display_speech = None
-                    async for event in events():
-                        if event["type"] == "text":
-                            safe_text = sanitize_tts_characters(event["text"])
-                            if safe_text:
-                                parts.append(safe_text)
-                                round_parts.append(safe_text)
-                            if event["text"]:
-                                yield event["text"]
-                        elif event["type"] == "tool_call":
-                            calls.append(event)
-                        elif event["type"] == "action_plan":
-                            display_speech = event.get("speech", "")
-                            plan = {**event, "speech": sanitize_tts_characters(display_speech)}
-                            if not plan["speech"].strip():
-                                raise ValueError("LLM returned no speech supported by the configured TTS path.")
-                            if plan.get("reply_kind") == "speaker_identity":
-                                plan = {**plan, "actions": [],
-                                        "speech": sanitize_tts_characters(_current_speaker_reply(world_state))}
-                                display_speech = plan["speech"]
-                            calls.extend({"id": f"call_{uuid.uuid4().hex}", "name": action["name"],
-                                          "arguments": json.dumps(action["arguments"])}
-                                         for action in plan["actions"])
-                        elif event["type"] == "usage":
-                            usage, timing = event["usage"], event["timings"]
-                            stats.setdefault("requests", []).append({
-                                "prompt_tokens": usage.get("prompt_tokens"),
-                                "output_tokens": usage.get("completion_tokens"),
-                                "ttft_ms": event["ttft_ms"], "prompt_ms": timing.get("prompt_ms"),
-                                "decode_ms": timing.get("predicted_ms"),
-                                "tokens_per_second": timing.get("predicted_per_second"),
-                            })
-                            count = usage.get("completion_tokens")
-                            if isinstance(count, int) and count >= 0:
-                                stats["output_tokens"] = stats.get("output_tokens", 0) + count
-                            stats["decode_ms"] = stats.get("decode_ms", 0) + event["decode_ms"]
-                            stats["ttft_ms"] = stats.get("ttft_ms", event["ttft_ms"])
-                            if timing.get("predicted_per_second") is not None:
-                                stats["server_tokens_per_second"] = timing["predicted_per_second"]
-                            if timing.get("prompt_ms") is not None:
-                                stats["prompt_ms"] = stats.get("prompt_ms", 0) + timing["prompt_ms"]
+                    async with aclosing(events()) as round_events:
+                        async for event in round_events:
+                            if event["type"] == "text":
+                                safe_text = sanitize_tts_characters(event["text"])
+                                if safe_text:
+                                    parts.append(safe_text)
+                                    round_parts.append(safe_text)
+                                if event["text"]:
+                                    yield event["text"]
+                            elif event["type"] == "tool_call":
+                                calls.append(event)
+                            elif event["type"] == "action_plan":
+                                display_speech = event.get("speech", "")
+                                plan = {**event, "speech": sanitize_tts_characters(display_speech)}
+                                if not plan["speech"].strip():
+                                    raise ValueError("LLM returned no speech supported by the configured TTS path.")
+                                if plan.get("reply_kind") == "speaker_identity":
+                                    plan = {**plan, "actions": [],
+                                            "speech": sanitize_tts_characters(_current_speaker_reply(world_state))}
+                                    display_speech = plan["speech"]
+                                calls.extend({"id": f"call_{uuid.uuid4().hex}", "name": action["name"],
+                                              "arguments": json.dumps(action["arguments"])}
+                                             for action in plan["actions"])
+                            elif event["type"] == "usage":
+                                usage, timing = event["usage"], event["timings"]
+                                stats.setdefault("requests", []).append({
+                                    "prompt_tokens": usage.get("prompt_tokens"),
+                                    "output_tokens": usage.get("completion_tokens"),
+                                    "ttft_ms": event["ttft_ms"], "prompt_ms": timing.get("prompt_ms"),
+                                    "decode_ms": timing.get("predicted_ms"),
+                                    "tokens_per_second": timing.get("predicted_per_second"),
+                                })
+                                count = usage.get("completion_tokens")
+                                if isinstance(count, int) and count >= 0:
+                                    stats["output_tokens"] = stats.get("output_tokens", 0) + count
+                                stats["decode_ms"] = stats.get("decode_ms", 0) + event["decode_ms"]
+                                stats["ttft_ms"] = stats.get("ttft_ms", event["ttft_ms"])
+                                if timing.get("predicted_per_second") is not None:
+                                    stats["server_tokens_per_second"] = timing["predicted_per_second"]
+                                if timing.get("prompt_ms") is not None:
+                                    stats["prompt_ms"] = stats.get("prompt_ms", 0) + timing["prompt_ms"]
                     if not calls:
                         if plan:
                             parts.append(plan["speech"])
@@ -493,18 +497,28 @@ async def _finish_live_transcript(websocket, stream):
         await asyncio.gather(finalizing, cancelled, return_exceptions=True)
 
 
-async def _synthesize_chunks(provider, text, voice, speed, metrics=None):
+async def _synthesize_chunks(provider, text, voice, speed, metrics=None, *, segment_index=0, input_mode="conversation"):
     stream = getattr(provider, "stream_synthesize", None)
-    if stream is None:
-        yield await provider.synthesize_segment(text, voice, speed)
-    elif getattr(provider, "supports_timing_metrics", False):
-        async with aclosing(stream(text, voice, speed, timing_metrics=metrics)) as chunks:
-            async for chunk in chunks:
-                yield chunk
+    started = perf_counter()
+    first_audio_ms = None
+    fields = {"segment_index": segment_index, "text_characters": len(text), "input_mode": input_mode}
+    try:
+        if stream is None:
+            result = await provider.synthesize_segment(text, voice, speed)
+            first_audio_ms = (perf_counter() - started) * 1000
+            yield result
+        else:
+            kwargs = {"timing_metrics": metrics} if getattr(provider, "supports_timing_metrics", False) else {}
+            async with aclosing(stream(text, voice, speed, **kwargs)) as chunks:
+                async for chunk in chunks:
+                    if first_audio_ms is None:
+                        first_audio_ms = (perf_counter() - started) * 1000
+                    yield chunk
+    except BaseException:
+        measure("tts_first_audio_ms", None, status="error_or_cancelled", **fields)
+        raise
     else:
-        async with aclosing(stream(text, voice, speed)) as chunks:
-            async for chunk in chunks:
-                yield chunk
+        measure("tts_first_audio_ms", first_audio_ms, **fields)
 
 
 @traced_turn
@@ -513,6 +527,7 @@ async def handle_websocket(websocket: Any):
     started = perf_counter()
     released_at = started
     stt_stream = None
+    stt_cleanup_task = None
     utterance_world_task = None
     try:
         first = await websocket.receive_json()
@@ -565,7 +580,7 @@ async def handle_websocket(websocket: Any):
             audio_chunks = 0
             tts_metrics = {}
             async with aclosing(_synthesize_chunks(
-                websocket.app.state.providers.tts, provided_text, voice, speed, tts_metrics
+                websocket.app.state.providers.tts, provided_text, voice, speed, tts_metrics, input_mode="speak"
             )) as chunks:
                 async for result in chunks:
                     if first_audio is None:
@@ -673,27 +688,33 @@ async def handle_websocket(websocket: Any):
             metrics["stt_total_ms"] = None
         elif audio_size:
             stt_started = perf_counter()
-            if stt_stream is not None:
-                transcript = await _finish_live_transcript(websocket, stt_stream)
-                if transcript is None:
-                    return
-                await stt_stream.close()
-                stt_stream = None
-            else:
-                audio = b"".join(audio_parts)
-                if mime_type == "audio/pcm":
-                    from io import BytesIO
-                    import wave
+            try:
+                if stt_stream is not None:
+                    transcript = await _finish_live_transcript(websocket, stt_stream)
+                    if transcript is None:
+                        return
+                    # Cleanup must not delay transcript delivery or inflate STT latency.
+                    stt_cleanup_task = asyncio.create_task(stt_stream.close())
+                    stt_stream = None
+                else:
+                    audio = b"".join(audio_parts)
+                    if mime_type == "audio/pcm":
+                        from io import BytesIO
+                        import wave
 
-                    output = BytesIO()
-                    with wave.open(output, "wb") as wav:
-                        wav.setnchannels(1)
-                        wav.setsampwidth(2)
-                        wav.setframerate(sample_rate)
-                        wav.writeframes(audio)
-                    audio = output.getvalue()
-                    mime_type = "audio/wav"
-                transcript = await websocket.app.state.providers.stt.transcribe(audio, mime_type)
+                        output = BytesIO()
+                        with wave.open(output, "wb") as wav:
+                            wav.setnchannels(1)
+                            wav.setsampwidth(2)
+                            wav.setframerate(sample_rate)
+                            wav.writeframes(audio)
+                        audio = output.getvalue()
+                        mime_type = "audio/wav"
+                    transcript = await websocket.app.state.providers.stt.transcribe(audio, mime_type)
+            except BaseException:
+                measure("stt_completion_ms", None, status="error_or_cancelled",
+                        timing_boundary=STT_TIMING_BOUNDARY, measurement_source="backend")
+                raise
             metrics["stt_total_ms"] = round((perf_counter() - stt_started) * 1000, 2)
             record("stt", "transcription", provider=settings.stt_provider, transcript=transcript,
                    duration_ms=metrics["stt_total_ms"])
@@ -709,9 +730,16 @@ async def handle_websocket(websocket: Any):
             )
             await websocket.close(code=1008)
             return
-        await websocket.send_json(
-            {"type": "transcript", "text": text, "language": "en"}
-        )
+        transcript_event = {"type": "transcript", "text": text, "language": "en"}
+        if not provided_text:
+            receipts = getattr(websocket.app.state, "transcript_measurements", None)
+            if receipts is None:
+                receipts = websocket.app.state.transcript_measurements = TranscriptMeasurements()
+            transcript_event["stt_measurement_id"] = receipts.issue(
+                context.get(), recording_ms=metrics["recording_ms"],
+                backend_release_to_transcript_ms=(perf_counter() - released_at) * 1000,
+                audio_duration_ms=metrics.get("stt_audio_duration_ms"))
+        await websocket.send_json(transcript_event)
         transcript_ready_at = perf_counter()
         metrics["release_to_transcript_ms"] = round((transcript_ready_at - released_at) * 1000, 2)
         logger.info("User transcript: %s", text)
@@ -769,7 +797,7 @@ async def handle_websocket(websocket: Any):
                 quality = "estimated"
                 async with aclosing(_synthesize_chunks(
                     websocket.app.state.providers.tts, segment_text, voice,
-                    max(.25, min(4., speed * delivery.rate)), metrics
+                    max(.25, min(4., speed * delivery.rate)), metrics, segment_index=segment_index
                 )) as chunks:
                     async for result in chunks:
                         alignment_started = perf_counter()
@@ -961,6 +989,8 @@ async def handle_websocket(websocket: Any):
         metrics["llm_gesture_parse_ms"] = round(metrics.get("llm_gesture_parse_ms", 0.0), 3)
         metrics["gesture_cue_assignment_ms"] = round(metrics.get("gesture_cue_assignment_ms", 0.0), 3)
         metrics["gesture_audio_alignment_ms"] = round(metrics.get("gesture_audio_alignment_ms", 0.0), 3)
+        for metric in ("llm_gesture_parse_ms", "gesture_cue_assignment_ms", "gesture_audio_alignment_ms"):
+            measure(metric, metrics[metric], gesture_count=len(gesture_tags_seen))
         metrics["kokoro_total_ms"] = round(metrics.get("kokoro_total_ms", 0.0), 3) if settings.tts_provider == "kokoro" else None
         metrics["tts_ttfb_ms"] = tts_first_call_ms
         first_text_at = llm_started + llm_ttft / 1000 if llm_ttft is not None else None
@@ -1030,6 +1060,10 @@ async def handle_websocket(websocket: Any):
     finally:
         if stt_stream is not None:
             await stt_stream.close()
+        if stt_cleanup_task is not None:
+            results = await asyncio.gather(stt_cleanup_task, return_exceptions=True)
+            if isinstance(results[0], Exception):
+                logger.warning("STT socket cleanup failed: %s", results[0])
         if utterance_world_task is not None:
             utterance_world_task.cancel()
             await asyncio.gather(utterance_world_task, return_exceptions=True)
