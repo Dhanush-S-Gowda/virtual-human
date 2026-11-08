@@ -31,6 +31,10 @@ DEFAULTS = {
     "faster_whisper_download_root": ".cache/faster-whisper",
     "min_speech_segment_words": 8,
     "max_speech_segment_words": 8,
+    "first_speech_segment_words": 0,
+    "kokoro_warmup_on_recording": False,
+    "kokoro_warmup_idle_seconds": 15.0,
+    "kokoro_warmup_timeout_seconds": 2.0,
     "tts_device": "auto",
     "tts_speed_min": 0.75,
     "tts_speed_max": 1.5,
@@ -105,6 +109,14 @@ for name in ("min_speech_segment_words", "max_speech_segment_words", "tts_max_co
         raise ValueError(f"{name} must be a positive integer.")
 if config["max_speech_segment_words"] < config["min_speech_segment_words"]:
     raise ValueError("max_speech_segment_words must be at least min_speech_segment_words.")
+if type(config["first_speech_segment_words"]) is not int or config["first_speech_segment_words"] < 0:
+    raise ValueError("first_speech_segment_words must be a nonnegative integer.")
+if type(config["kokoro_warmup_on_recording"]) is not bool:
+    raise ValueError("kokoro_warmup_on_recording must be a boolean.")
+for name in ("kokoro_warmup_idle_seconds", "kokoro_warmup_timeout_seconds"):
+    value = config[name]
+    if type(value) not in (int, float) or not isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number.")
 
 config["system_prompt"] = (
     (CONFIG_FILE.parent / config.pop("system_prompt_file", "llm/prompts/system.txt"))

@@ -1,0 +1,38 @@
+[
+  {
+    "condition": "initial",
+    "seconds": 0.85,
+    "gpu_before": "P8, 210 MHz, 405 MHz, 5646 MiB",
+    "timed_words": 6
+  },
+  {
+    "condition": "immediate_repeat",
+    "seconds": 0.14,
+    "gpu_before": "P0, 510 MHz, 810 MHz, 5646 MiB",
+    "timed_words": 6
+  },
+  {
+    "condition": "after_20s_idle",
+    "seconds": 0.488,
+    "gpu_before": "P8, 210 MHz, 405 MHz, 5646 MiB",
+    "timed_words": 6
+  },
+  {
+    "condition": "immediate_after_idle_repeat",
+    "seconds": 0.138,
+    "gpu_before": "P0, 210 MHz, 405 MHz, 5646 MiB",
+    "timed_words": 6
+  },
+  {
+    "condition": "after_chat_model",
+    "seconds": 0.147,
+    "gpu_before": "P0, 2730 MHz, 8201 MHz, 5646 MiB",
+    "timed_words": 6
+  },
+  {
+    "condition": "immediate_after_chat_repeat",
+    "seconds": 0.137,
+    "gpu_before": "P0, 2745 MHz, 8201 MHz, 5646 MiB",
+    "timed_words": 6
+  }
+]

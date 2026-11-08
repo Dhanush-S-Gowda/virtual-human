@@ -79,3 +79,27 @@ def test_character_by_character_stream_never_loses_or_splits_a_word():
     assert " ".join(ready).split() == text.split()
     assert all(8 <= len(item.split()) <= 16 for item in ready[:-1])
     assert remaining == ""
+
+
+def test_first_segment_is_shorter_but_later_segments_keep_regular_limits(monkeypatch):
+    monkeypatch.setattr(settings, "first_speech_segment_words", 6)
+    text = " ".join(f"word{index}" for index in range(40))
+    ready, remaining = _split_ready_segments(text, force=True, first_segment=True)
+    assert [len(segment.split()) for segment in ready] == [6, 16, 16, 2]
+    assert " ".join(ready) == text
+    assert remaining == ""
+
+
+def test_short_first_segment_waits_for_complete_word_across_deltas(monkeypatch):
+    monkeypatch.setattr(settings, "first_speech_segment_words", 6)
+    text = "one two three four five incomp"
+    assert _split_ready_segments(text, first_segment=True) == ([], text)
+    ready, remaining = _split_ready_segments(text + "lete seven", first_segment=True)
+    assert ready == ["one two three four five incomplete"]
+    assert remaining == "seven"
+
+
+def test_zero_disables_short_first_segment(monkeypatch):
+    monkeypatch.setattr(settings, "first_speech_segment_words", 0)
+    text = "one two three four five six seven "
+    assert _split_ready_segments(text, first_segment=True) == ([], text)

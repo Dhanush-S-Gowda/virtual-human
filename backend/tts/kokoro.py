@@ -2,6 +2,8 @@ import base64
 import asyncio
 import io
 import wave
+import logging
+from contextlib import aclosing
 from time import perf_counter
 from typing import Any
 from math import isfinite
@@ -14,6 +16,7 @@ from schemas import SynthesizeResponse
 from diagnostics import record
 
 KOKORO_TIMEOUT_SECONDS = settings.timeout
+logger = logging.getLogger(__name__)
 
 
 def _tts_auth_headers() -> dict[str, str] | None:
@@ -117,6 +120,9 @@ class KokoroProvider:
     def __init__(self):
         self._client = None
         self._request_slots = asyncio.Semaphore(settings.tts_max_concurrent_segments)
+        self._warmup_task = None
+        self._last_activity = None
+        self._active_requests = 0
 
     async def initialize(self):
         self._get_client()
@@ -127,9 +133,41 @@ class KokoroProvider:
         return self._client
 
     async def close(self):
+        if self._warmup_task is not None:
+            self._warmup_task.cancel()
+            await asyncio.gather(self._warmup_task, return_exceptions=True)
+            self._warmup_task = None
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    def prepare_for_recording(self, voice, speed):
+        """Start a best-effort silent warmup without delaying microphone input."""
+        if (not settings.kokoro_warmup_on_recording or self._active_requests
+                or self._request_slots.locked()
+                or (self._warmup_task is not None and not self._warmup_task.done())
+                or (self._last_activity is not None
+                    and perf_counter() - self._last_activity < settings.kokoro_warmup_idle_seconds)):
+            return False
+        self._last_activity = perf_counter()
+        self._warmup_task = asyncio.create_task(self._warm_for_recording(voice, speed))
+        return True
+
+    async def _warm_for_recording(self, voice, speed):
+        # A real request may have started since this task was scheduled.
+        if self._active_requests or self._request_slots.locked():
+            return
+        started = perf_counter()
+        try:
+            async with asyncio.timeout(settings.kokoro_warmup_timeout_seconds):
+                await self.synthesize_segment("Ready to speak.", voice, speed)
+            record("tts", "recording_warmup", status="ok",
+                   elapsed_ms=round((perf_counter() - started) * 1000, 2))
+        except Exception as exc:
+            # Warmup is optional; its failures must not fail the user's turn.
+            logger.debug("Kokoro recording warmup skipped: %s", type(exc).__name__)
+            record("tts", "recording_warmup", status="failed",
+                   error_type=type(exc).__name__)
 
     async def stream_synthesize(self, text, voice, speed, timing_metrics=None):
         """Yield a complete captioned segment; never substitute estimated timings."""
@@ -138,6 +176,7 @@ class KokoroProvider:
         waiting = perf_counter()
         async with self._request_slots:
             started = perf_counter()
+            self._active_requests += 1
             if timing_metrics is not None:
                 timing_metrics["kokoro_queue_wait_ms"] = timing_metrics.get("kokoro_queue_wait_ms", 0) + (started - waiting) * 1000
             try:
@@ -154,6 +193,9 @@ class KokoroProvider:
                 raise HTTPException(status_code=502, detail="Kokoro captioned speech request failed.") from exc
             except (ValueError, TypeError, AttributeError, wave.Error, EOFError) as exc:
                 raise HTTPException(status_code=502, detail="Kokoro returned invalid audio or word timestamps.") from exc
+            finally:
+                self._active_requests -= 1
+                self._last_activity = perf_counter()
             elapsed = (perf_counter() - started) * 1000
             if timing_metrics is not None:
                 timing_metrics.setdefault("kokoro_request_first_byte_ms", []).append(round(elapsed, 3))
@@ -165,8 +207,9 @@ class KokoroProvider:
             yield result
 
     async def synthesize_segment(self, text, voice, speed):
-        async for result in self.stream_synthesize(text, voice, speed):
-            return result
+        async with aclosing(self.stream_synthesize(text, voice, speed)) as chunks:
+            async for result in chunks:
+                return result
 
 
 async def synthesize_segment(text: str, voice: str, speed: float) -> SynthesizeResponse:

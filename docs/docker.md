@@ -64,9 +64,33 @@ The backend connects to `ws://nemotron:8080/v1/audio/transcriptions/realtime`
 after the speech server passes its readiness check. No host speech server is
 required. Check `docker compose logs nemotron-init nemotron` if startup fails.
 
+The backend merges adjacent camera-history windows with identical observations
+before sending them to the chat model. It keeps the full time range and keeps
+changes in people, objects, gestures, and pending work separate. This reduces
+repeated context without reducing the configured history duration. It does not
+change stored conversation memory.
+
+For response-time checks, connect the laptop to power and select Windows Best
+performance. Battery power can limit GPU speed even when models run on CUDA.
+Model startup still needs a warmup after a restart. Compare warm turns on the
+same power mode before changing model settings.
+
 Chat, speech recognition, and speech generation use the RTX GPU under the
-override. Camera uses CPU. Speech segments use 8-word minimum and 12-word maximum lengths, with
+override. Camera uses CPU to reduce contention on the shared 6 GB GPU; it does
+not receive a GPU reservation. Camera inference can run more slowly on CPU.
+The first speech segment has a 6-word cap to start playback sooner. Set
+`first_speech_segment_words` to zero to use the regular limits from the start.
+Later segments use 8-word minimum and 12-word maximum lengths, with
 one synthesis request at a time. The first model load is slower than warm use.
+
+Kokoro can run a silent warmup when audio recording starts. Set
+`kokoro_warmup_on_recording` to enable it. The generated audio is discarded.
+The warmup runs in the background, skips active synthesis and recent requests,
+and uses the selected voice and speed. `kokoro_warmup_idle_seconds` controls
+the idle threshold (15 seconds); `kokoro_warmup_timeout_seconds` bounds the
+request (2 seconds). Warmup failures do not fail the conversation. It does not
+run for text input or on a periodic timer. Measure STT and full-turn latency
+before enabling it: Nemotron and the chat model may already wake the GPU.
 
 Speech speed tags use `[speed:0.85]`, `[speed:1.2]`, and `[speed:1.0]`. The parser
 removes them before display and synthesis and applies the rate to subsequent

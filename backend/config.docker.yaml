@@ -73,6 +73,12 @@ min_speech_segment_words: 8
 # Split at a complete word when no sentence boundary is available by this limit.
 # The final remainder is sent even if it has fewer than the minimum words.
 max_speech_segment_words: 12
+# Start playback with a shorter first segment; zero uses the regular limits.
+first_speech_segment_words: 6
+# Optional silent warmup. Disabled: the live STT trial showed no latency gain.
+kokoro_warmup_on_recording: false
+kokoro_warmup_idle_seconds: 15.0
+kokoro_warmup_timeout_seconds: 2.0
 # One request at a time avoids overlapping CPU inference in the Kokoro service.
 tts_max_concurrent_segments: 1
 

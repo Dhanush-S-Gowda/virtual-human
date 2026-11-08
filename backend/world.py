@@ -12,6 +12,30 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def compact_visual_history(history):
+    """Merge adjacent unchanged observations without shortening camera history."""
+    result = {key: value for key, value in history.items() if key != "windows"}
+    result["windows"] = []
+    previous_observation = None
+    for window in history.get("windows", []):
+        observation = {key: value for key, value in window.items()
+                       if key not in {"window_id", "revision", "closed",
+                                      "start_seconds_ago", "end_seconds_ago"}}
+        start, end = window.get("start_seconds_ago"), window.get("end_seconds_ago")
+        previous = result["windows"][-1] if result["windows"] else None
+        if (previous is not None and observation == previous_observation
+                and start is not None and end is not None
+                and previous.get("end_seconds_ago") == start):
+            previous["end_seconds_ago"] = end
+            previous["window_count"] = previous.get("window_count", 1) + 1
+        else:
+            result["windows"].append({**observation,
+                                      **{key: window[key] for key in
+                                         ("start_seconds_ago", "end_seconds_ago") if key in window}})
+        previous_observation = observation
+    return result
+
+
 async def cv_request(kind, **fields):
     url = getattr(settings, "cv_adapter_url", "")
     if not url:
@@ -37,7 +61,8 @@ async def current_world(speaker_hint=None):
         reason = "cv_timeout" if isinstance(exc, TimeoutError) else "cv_connection_error"
         logger.warning("Camera scene query failed: %s (%s)", reason, type(exc).__name__)
         return {"status": "unavailable", "reason": reason, "people": [], "objects": [], "speaker": None}, {}
-    history = {"recent_visual_history": scene["recent_visual_history"]} if "recent_visual_history" in scene else {}
+    history = ({"recent_visual_history": compact_visual_history(scene["recent_visual_history"])}
+               if "recent_visual_history" in scene else {})
     freshness = {key: scene[key] for key in ("frame_id", "frame_age_ms") if key in scene}
     if not scene.get("frame_available", bool(scene.get("people") or scene.get("objects"))):
         return {"status": "unavailable", "reason": scene.get("frame_status", "no_frames"),

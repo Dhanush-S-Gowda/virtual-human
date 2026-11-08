@@ -521,13 +521,15 @@ _ABBREVIATIONS = {
 }
 
 
-def _split_ready_segments(buffer: str, force: bool = False) -> tuple[list[str], str]:
+def _split_ready_segments(buffer: str, force: bool = False, *, first_segment: bool = False) -> tuple[list[str], str]:
     """Accumulate a minimum, prefer sentences, and enforce a complete-word cap."""
     segments = []
-    min_words = settings.min_speech_segment_words
-    max_words = settings.max_speech_segment_words
     pattern = r"[.?!]+(?:\s+|$)" if force else r"[.?!]+\s+"
     while buffer:
+        max_words = settings.max_speech_segment_words
+        if first_segment and not segments and settings.first_speech_segment_words:
+            max_words = min(max_words, settings.first_speech_segment_words)
+        min_words = min(settings.min_speech_segment_words, max_words)
         boundary = -1
         words = list(re.finditer(r"\S+", buffer))
         for match in re.finditer(pattern, buffer):
@@ -727,6 +729,9 @@ async def handle_websocket(websocket: Any):
 
                 stt_stream = await open_stream(sample_rate, on_partial=send_transcript_partial)
         if not provided_text:
+            prepare = getattr(getattr(websocket.app.state.providers, "tts", None), "prepare_for_recording", None)
+            if prepare is not None:
+                prepare(voice, speed)
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
@@ -988,7 +993,7 @@ async def handle_websocket(websocket: Any):
         async def queue_ready(force=False):
             nonlocal text_buffer, buffer_origin, segment_index, first_segment_queued
             original = text_buffer
-            ready, remaining = _split_ready_segments(original, force=force)
+            ready, remaining = _split_ready_segments(original, force=force, first_segment=segment_index == 0)
             cursor = 0
             for segment in ready:
                 start = original.index(segment, cursor)

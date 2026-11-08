@@ -1,0 +1,18 @@
+[
+  {
+    "warmup_enabled": false,
+    "warmup_triggered": false,
+    "transcript": "Hello, my name is Alex",
+    "stt_finalization_ms": 55.5,
+    "speech_response_ms": 117.78,
+    "release_to_audio_ms": 173.94
+  },
+  {
+    "warmup_enabled": true,
+    "warmup_triggered": true,
+    "transcript": "Hello, my name is Alex",
+    "stt_finalization_ms": 51.59,
+    "speech_response_ms": 122.69,
+    "release_to_audio_ms": 174.97
+  }
+]

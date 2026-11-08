@@ -1,0 +1,24 @@
+[
+  {
+    "model": "qwen3.5:4b",
+    "warmup_seconds": 1.44,
+    "prompt_passed": 13,
+    "prompt_total": 15,
+    "memory_passed": 5,
+    "memory_total": 5,
+    "median_reply_ms": 1246.8899999999999,
+    "mean_reply_ms": 1384.2288888888888,
+    "max_reply_ms": 2454.59
+  },
+  {
+    "model": "qwen3.5:2b",
+    "warmup_seconds": 22.95,
+    "prompt_passed": 13,
+    "prompt_total": 15,
+    "memory_passed": 2,
+    "memory_total": 5,
+    "median_reply_ms": 941.36,
+    "mean_reply_ms": 1493.2455555555555,
+    "max_reply_ms": 10612.96
+  }
+]

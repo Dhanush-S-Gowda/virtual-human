@@ -4,8 +4,6 @@ services:
     gpus: all
   backend:
     gpus: all
-  cv:
-    gpus: all
   ollama:
     gpus: all
     deploy:

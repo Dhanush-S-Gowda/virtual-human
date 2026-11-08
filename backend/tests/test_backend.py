@@ -296,7 +296,8 @@ class BackendTests(unittest.TestCase):
 
         speech_events = [event for event in websocket.events if event["type"] == "speech"]
         self.assertGreaterEqual(tts.max_active, 2)
-        self.assertEqual([event["index"] for event in speech_events], [0, 1, 2])
+        self.assertGreaterEqual(len(speech_events), 3)
+        self.assertEqual([event["index"] for event in speech_events], list(range(len(speech_events))))
 
     def test_health_and_timing_contract(self):
         self.assertTrue(any(getattr(route, "path", "") == "/health" for route in self.app.routes))

@@ -1,0 +1,44 @@
+{
+  "model": "qwen3.5:4b",
+  "results": [
+    {
+      "case": "exact_reported_exchange",
+      "question": "Can you tell me the number I said you remember?",
+      "reply": "[greeting] The number you asked me to remember is 347.",
+      "expected": "347",
+      "passed": true
+    },
+    {
+      "case": "latest_number",
+      "question": "Can you tell me the number I said you remember?",
+      "reply": "[nod_yes] The number you asked me to remember is 347.",
+      "expected": "347",
+      "passed": true
+    },
+    {
+      "case": "leading_zero_code",
+      "question": "What entry code did I give you?",
+      "reply": "[nod_yes] You gave me the entry code 00347.",
+      "expected": "00347",
+      "passed": true
+    },
+    {
+      "question": "What project access number did I give you?",
+      "reply": "[nod_yes] You told me your project access number is 4817.",
+      "expected": "4817",
+      "passed": true,
+      "elapsed_ms": 1512.52,
+      "memory_hits": 1,
+      "retrieval_ms": 29.99
+    },
+    {
+      "question": "What do I prefer for my morning meal now?",
+      "reply": "[nod_yes] You told me your preferred breakfast has changed to dosa.",
+      "expected": "dosa",
+      "passed": true,
+      "elapsed_ms": 1513.9,
+      "memory_hits": 2,
+      "retrieval_ms": 27.34
+    }
+  ]
+}
