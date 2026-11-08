@@ -2,14 +2,15 @@
 
 Virtual Human is a browser-based 3D companion with push-to-talk conversation,
 automatic speech playback, lip synchronization, gestures, and optional camera
-understanding. The Docker demo uses Ollama, Faster-Whisper, and Kokoro locally.
+understanding. The Docker demo uses Ollama, Nemotron streaming STT, and Kokoro locally.
 Celery and Redis save background metrics and index conversation memory.
 SQLite, local embeddings, and hybrid reranking provide persistent recall.
 See the [memory guide](docs/memory.md). No sign-in is required.
 
 ## Start the demo
 
-Use Docker Desktop with Linux containers and Compose 2.24 or newer. Initial
+Use Docker Desktop with Linux containers, NVIDIA GPU support, and Compose 2.24
+or newer. Initial
 setup downloads container images and model weights. Run these commands from
 the repository root.
 
@@ -19,14 +20,13 @@ With NVIDIA GPU support in Docker:
 docker compose up --build -d
 ```
 
-For CPU-only operation:
+The root entry includes GPU access for Nemotron, Ollama, Kokoro, and the
+backend. The current Nemotron deployment is verified with NVIDIA CUDA.
 
-```powershell
-docker compose -f devops/compose.yaml up --build -d
-```
-
-Keep `-f devops/compose.yaml` in later Compose commands when using CPU only.
-The root entry includes the GPU configuration by default.
+Compose downloads the Nemotron English 0.6B model through `nemotron-init`.
+The model stays in the `nemotron-models` volume for later starts. The backend
+waits for Nemotron to become ready, then connects over the internal Docker
+network. A separate speech server on the host is not required.
 
 Open **http://localhost:4173** after startup. Allow microphone access, hold
 Space to speak, then release it. The reply audio plays automatically. Allow
@@ -36,12 +36,21 @@ Check startup progress or stop the stack:
 
 ```powershell
 docker compose ps -a
-docker compose logs -f ollama-init speech-init backend cv worker
+docker compose logs -f ollama-init nemotron-init nemotron backend cv worker
 docker compose down
 ```
 
 The model initializer containers should finish with exit code 0. `down`
 retains named volumes. `down -v` deletes stored models and data.
+
+To start or rebuild only the backend and its dependencies:
+
+```powershell
+docker compose up -d backend
+docker compose up -d --build backend
+```
+
+Use `backend` as the service name, without a `--` prefix.
 
 Windows users can start the default GPU setup with
 `.\devops\Start-VirtualHuman.ps1`. Use `-Rebuild` to rebuild or `-Stop` to stop it.
@@ -84,7 +93,7 @@ flowchart LR
     Browser[Browser] --> Web[Nginx: localhost:4173]
     Web -->|/api/ws| API[Conversation API]
     Web -->|/cv| CV[Camera inference]
-    API --> STT[Faster-Whisper]
+    API --> STT[Nemotron]
     API --> LLM[Ollama]
     API --> TTS[Kokoro]
     API <-->|scene context| CV
@@ -139,6 +148,13 @@ disables persistence and retrieval; `MEMORY_DB_PATH` overrides the database path
 See the [memory guide](docs/memory.md) for all settings and failure behavior.
 
 ## Recorded validation
+
+The Nemotron Compose integration passed nine provider tests and two model
+download tests. A live check sent a Kokoro-generated WAV through the backend
+STT provider and returned: "Hello, my name is Alex. The weather is sunny today".
+Nemotron used CUDA, and the frontend API health route reported the configured
+Nemotron provider. This check verifies service integration with generated
+speech; microphone and noisy-room recognition were not tested in this check.
 
 The memory update passed **349 backend tests** and **113 frontend tests**.
 One backend test was skipped; seven backend subtests also passed. Backend and
