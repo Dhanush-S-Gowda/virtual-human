@@ -12,6 +12,7 @@ commands from the repository root so package imports resolve.
 | `benchmark_current_architecture.py` | Measure current Docker Qwen 4B and Kokoro providers |
 | `summarize_benchmarks.py` | Export one model's recorded-turn statistics, reliability, and source snapshot |
 | `evaluate_prompt.py` | Run local-model answer and control checks with fixed scenes and isolated conversations |
+| `evaluate_memory.py` | Check recall beyond recent history and preference corrections using an isolated database |
 | `monitor_resources.py` | Inspect process and resource use |
 | `setup_observability.py` | Configure optional observability resources |
 | `sync_animation_assets.py` | Copy animations into the frontend and update catalog/prompt tags |

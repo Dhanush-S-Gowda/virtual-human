@@ -180,7 +180,8 @@ class OpenAIProvider:
         # Buffer structured output: partial JSON must never become speech/actions.
         instruction = (
             "Return a JSON plan with reply_kind, actions and speech. "
-            "Use speaker_identity with actions [] for speaker identification; otherwise use conversation. "
+            "Use speaker_identity with actions [] only to identify who is speaking in the current camera view. "
+            "Use conversation for remembered names or personal facts, camera counts, and other questions. "
             "Put gesture tags directly in speech as instructed. actions is [] except when calling rename_person to remember a self-introduced or explicitly requested name. "
             "speech is the spoken reply with optional allowed inline tags, without tool names or metadata. "
             "Actions accompany speech; after a tool failure, correct it or explain simply."

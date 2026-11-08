@@ -47,6 +47,31 @@ DEFAULTS = {
 }
 config = {**DEFAULTS, **(config or {})}
 
+memory_defaults = {
+    "enabled": True, "database": "data/conversation-memory.sqlite3", "max_turns": 2000,
+    "semantic_enabled": True, "embedding_url": "http://127.0.0.1:11434",
+    "embedding_model": "all-minilm", "embedding_timeout": 1.5,
+    "top_k": 4, "candidate_count": 30, "context_chars": 6000,
+}
+if not isinstance(config.get("memory", {}), dict):
+    raise ValueError("memory must be a configuration mapping.")
+config["memory"] = {**memory_defaults, **config.get("memory", {})}
+for name in ("enabled", "semantic_enabled"):
+    if type(config["memory"][name]) is not bool:
+        raise ValueError(f"memory.{name} must be a boolean.")
+for name, maximum in (("max_turns", 10000), ("top_k", 20), ("candidate_count", 200), ("context_chars", 16000)):
+    value = config["memory"][name]
+    if type(value) is not int or not 1 <= value <= maximum:
+        raise ValueError(f"memory.{name} must be an integer between 1 and {maximum}.")
+if config["memory"]["top_k"] > config["memory"]["candidate_count"] or config["memory"]["context_chars"] < 1024:
+    raise ValueError("Memory candidates must cover top_k; context_chars must be at least 1024.")
+memory_timeout = config["memory"]["embedding_timeout"]
+if type(memory_timeout) not in (int, float) or not isfinite(memory_timeout) or not .1 <= memory_timeout <= 3:
+    raise ValueError("memory.embedding_timeout must be between 0.1 and 3 seconds.")
+for name in ("database", "embedding_url", "embedding_model"):
+    if not isinstance(config["memory"][name], str) or not config["memory"][name].strip():
+        raise ValueError(f"memory.{name} must be a nonempty string.")
+
 if config["gesture_pacing"] not in {"speech", "complete"}:
     raise ValueError("gesture_pacing must be speech or complete.")
 
@@ -99,6 +124,7 @@ settings = SimpleNamespace(
     **{
         **config,
         "cv": _namespace(config["cv"]),
+        "memory": _namespace(config["memory"]),
         "model_workers": _namespace(config.get("model_workers", {})),
     }
 )

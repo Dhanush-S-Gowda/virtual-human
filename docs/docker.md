@@ -18,7 +18,7 @@ docker compose up --build -d
 ```
 
 Open http://localhost:4173. The avatar app opens directly without sign-in.
-Celery and Redis remain enabled for background metrics. The frontend binds to
+Celery and Redis remain enabled for background metrics and memory indexing. The frontend binds to
 loopback on this laptop. API and camera WebSockets use the same app origin.
 
 Initial setup downloads container images and model weights. The model
@@ -41,7 +41,7 @@ jobs, and metrics. Do not use it for a routine restart.
 | talking-avatar | Nginx static files and API/CV routing | 127.0.0.1:4173 |
 | backend | Conversation WebSocket and speech pipeline | Internal only |
 | redis | Celery broker DB 0 and task results DB 1 | Internal only |
-| worker | Celery metrics persistence | Internal only |
+| worker | Celery metrics persistence and memory indexing | Internal only |
 | ollama / kokoro | Local chat and speech generation | Internal only |
 | cv | Independent camera inference | Internal only |
 

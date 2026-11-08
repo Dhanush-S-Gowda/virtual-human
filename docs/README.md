@@ -13,6 +13,7 @@ Use one guide for each task:
 | [Troubleshooting](troubleshooting.md) | Diagnose startup, device, and provider failures |
 | [Benchmarks](benchmarks/README.md) | Review recorded performance, reliability, source data, and calculation methods |
 | [Prompt evaluations](prompt-evaluation/README.md) | Inspect response quality, grounding, and voice-preference checks |
+| [Conversation memory](memory.md) | Configure persistent recall, retrieval, and reranking |
 | [Changelog](../CHANGELOG.md) | Review implemented changes and recorded validation |
 
 Component entry points: [backend](../backend/README.md),

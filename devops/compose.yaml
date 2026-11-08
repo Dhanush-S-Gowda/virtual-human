@@ -40,7 +40,7 @@ services:
     - /bin/sh
     - -c
     command:
-    - ollama pull qwen3.5:4b && ollama run --think=false --keepalive=30m qwen3.5:4b
+    - ollama pull all-minilm && ollama pull qwen3.5:4b && ollama run --think=false --keepalive=30m qwen3.5:4b
       'Reply with READY only.'
     depends_on:
       ollama:
@@ -69,6 +69,7 @@ services:
     environment:
       OPENOBSERVE_ENABLED: 'false'
       METRICS_CSV_PATH: /app/data/metrics.csv
+      MEMORY_DB_PATH: /app/data/conversation-memory.sqlite3
       CELERY_ENABLED: 'true'
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
@@ -166,6 +167,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       METRICS_DB_PATH: /app/data/metrics.sqlite3
+      MEMORY_DB_PATH: /app/data/conversation-memory.sqlite3
     volumes:
     - backend-data:/app/data
     depends_on:

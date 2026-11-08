@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { conversationSessionId } from "../src/stt/session.js";
+import { conversationSessionId, persistentConversationId } from "../src/stt/session.js";
 
 function storage() {
   const values = new Map();
@@ -19,4 +19,19 @@ test("separate tabs have separate sessions", () => {
 test("blocked storage falls back to an ephemeral ID", () => {
   const blocked = { getItem() { throw new Error("blocked"); } };
   assert.equal(conversationSessionId(blocked, () => "fallback"), "fallback");
+});
+
+test("memory identity survives a new tab and browser session", () => {
+  const profile = storage();
+  assert.equal(persistentConversationId(profile, storage(), () => "saved"), "saved");
+  assert.equal(persistentConversationId(profile, storage(), () => "new"), "saved");
+  assert.equal(persistentConversationId(storage(), storage(), () => "other"), "other");
+});
+
+test("existing tab identity migrates and blocked local storage uses the tab", () => {
+  const tab = storage();
+  conversationSessionId(tab, () => "existing");
+  assert.equal(persistentConversationId(storage(), tab), "existing");
+  const blocked = { getItem() { throw new Error("blocked"); } };
+  assert.equal(persistentConversationId(blocked, tab), "existing");
 });

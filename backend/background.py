@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from celery import Celery
+import httpx
 
 
 celery_app = Celery(
@@ -48,3 +49,25 @@ def store_metrics(event_id, metrics, database=None):
                  retry_backoff=True, max_retries=3)
 def record_metrics(event_id, metrics):
     return store_metrics(event_id, metrics)
+
+
+@celery_app.task(name="virtual_human.index_memory_turn", autoretry_for=(sqlite3.OperationalError, httpx.HTTPError),
+                 retry_backoff=True, max_retries=3, ignore_result=True)
+def index_memory_turn(turn_id):
+    """Queue only a row ID; read conversation text from the shared local volume."""
+    from config import settings
+    from memory.service import embedding_text
+    from memory.store import MemoryStore
+    config = settings.memory
+    if not config.enabled or not config.semantic_enabled:
+        return
+    database = os.getenv("MEMORY_DB_PATH") or str(Path(__file__).resolve().parent / config.database)
+    store = MemoryStore(database, config.max_turns)
+    turn = store.turn(turn_id)
+    if turn is None:
+        return
+    response = httpx.post(config.embedding_url.rstrip("/") + "/api/embed", json={
+        "model": config.embedding_model, "input": embedding_text(turn), "truncate": True,
+        "keep_alive": "30m", "options": {"num_gpu": 0}}, timeout=config.embedding_timeout)
+    response.raise_for_status()
+    store.put_vector(turn_id, config.embedding_model, response.json()["embeddings"][0])

@@ -3,7 +3,9 @@
 Virtual Human is a browser-based 3D companion with push-to-talk conversation,
 automatic speech playback, lip synchronization, gestures, and optional camera
 understanding. The Docker demo uses Ollama, Faster-Whisper, and Kokoro locally.
-Celery and Redis save background metrics. No sign-in is required.
+Celery and Redis save background metrics and index conversation memory.
+SQLite, local embeddings, and hybrid reranking provide persistent recall.
+See the [memory guide](docs/memory.md). No sign-in is required.
 
 ## Start the demo
 
@@ -89,12 +91,65 @@ flowchart LR
     API --> CSV[CSV metrics]
     API --> Redis[Redis queue]
     Redis --> Worker[Celery worker]
-    Worker --> SQLite[SQLite metrics]
+    Worker --> MetricsDB[SQLite metrics]
+    API <-->|saved turns and retrieved memories| MemoryDB[SQLite conversation memory]
+    API -->|query embeddings| LLM
+    Worker -->|turn embeddings| LLM
+    Worker -->|save vectors| MemoryDB
 ```
 
-Only the frontend publishes a host port. Celery handles metrics persistence;
+Only the frontend publishes a host port. Celery handles metrics persistence and
+conversation embedding jobs through Redis;
 live speech and camera processing use their own services. Camera preview and
 camera inference have separate connection status.
+
+## Conversation memory
+
+Completed turns are saved in SQLite. On reconnect, the backend restores the
+latest eight turns and the saved speech-rate preference. For each new request,
+retrieval-augmented generation (RAG) supplies relevant older conversation data:
+local `all-minilm` embeddings and FTS5 keyword search find candidates, then a
+hybrid reranker selects up to four excerpts within a 6,000-character budget.
+The reranker considers relevance, recency, corrections, and duplicates.
+Current camera observations take priority over historical camera statements.
+
+Memory persists across backend restarts in the `backend-data` Docker volume.
+The default retention limit is 2,000 turns per conversation. The browser saves
+its conversation ID in local storage, so tabs in the same browser profile share
+memory. A different profile starts separate memory. Clearing browser storage
+removes the link to saved conversations. Earlier history already lost from RAM
+cannot be recovered.
+
+Celery indexes saved turns in the background. Redis receives row IDs, while
+conversation text stays in the shared SQLite database. Embeddings use CPU
+inference. If embeddings are unavailable, retrieval falls back to keyword
+search. Recall is selective and does not guarantee every answer.
+
+For an existing installation, download the embedding model, rebuild the changed
+services, and reload the browser:
+
+```powershell
+docker compose exec -T ollama ollama pull all-minilm
+docker compose up --build -d backend worker talking-avatar
+```
+
+Set the `memory` block in the active backend configuration to change retention,
+retrieval limits, the embedding model, or its timeout. `MEMORY_ENABLED=false`
+disables persistence and retrieval; `MEMORY_DB_PATH` overrides the database path.
+See the [memory guide](docs/memory.md) for all settings and failure behavior.
+
+## Recorded validation
+
+The memory update passed **349 backend tests** and **113 frontend tests**.
+One backend test was skipped; seven backend subtests also passed. Backend and
+frontend Docker builds passed, and a real Redis/Celery job saved an embedding.
+
+Local Qwen 3.5 4B recalled an old number and a corrected breakfast preference
+after 12 unrelated turns and recreation of the conversation objects. These two
+checks confirm the tested scenarios, not universal recall or response speed.
+See the [memory evaluation](docs/prompt-evaluation/2026-11-08/memory.md),
+[prompt evaluation](docs/prompt-evaluation/2026-11-08/README.md), and
+[performance benchmarks](docs/benchmarks/2026-11-08-qwen4b/README.md).
 
 ## Configuration and development
 
@@ -114,6 +169,7 @@ API or frontend directly on the host.
 | Run on the host or execute tests | [Development and verification](docs/development.md) |
 | Understand conversation and camera processing | [Runtime architecture](docs/architecture.md) |
 | Understand speech and gesture timing | [Audio and gesture synchronization](docs/audio-gesture-synchronization.md) |
+| Configure persistent recall and reranking | [Conversation memory](docs/memory.md) |
 | Resolve startup, camera, or speech problems | [Troubleshooting](docs/troubleshooting.md) |
 | Review changes and recorded test results | [Changelog](CHANGELOG.md) |
 

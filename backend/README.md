@@ -9,6 +9,7 @@ speech synthesis, and turn metrics. Camera inference runs as a separate service.
 |---|---|
 | [cv](cv/README.md) | Camera events, object tracking, landmarks, and identity |
 | [llm](llm/README.md) | Chat provider, action plans, and validated tools |
+| [memory](memory/README.md) | Persistent turns, semantic retrieval, and reranking |
 | [stt](stt/README.md) | Faster-Whisper and Nemotron speech recognition |
 | [tts](tts/README.md) | Kokoro and Supertonic speech synthesis |
 | [scripts](scripts/README.md) | Model setup, asset sync, benchmarks, and diagnostics |
@@ -19,7 +20,7 @@ speech synthesis, and turn metrics. Camera inference runs as a separate service.
 
 - `main.py`: FastAPI health and conversation WebSocket endpoints.
 - `pipeline.py`: recording, transcription, reply, speech, and metrics coordination.
-- `background.py`: Celery task and SQLite metrics persistence.
+- `background.py`: Celery metrics persistence and memory embedding jobs.
 - `inline_gestures.py`: incremental gesture and speech-speed tag parsing.
 - `world.py`: camera scene queries and speaker context.
 - `runtime.py` and `provider_process.py`: model workers and process boundaries.

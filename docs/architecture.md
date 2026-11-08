@@ -32,6 +32,11 @@
 
 ### Gesture and speech alignment
 
+Conversation history is persisted in SQLite. Each request restores recent
+turns as needed and retrieves older relevant excerpts through local embeddings,
+FTS5 search, and a hybrid reranker. Celery indexes saved turns in the background.
+See [conversation memory](memory.md) for context limits and browser identity.
+
 See [Audio and gesture synchronization](audio-gesture-synchronization.md)
 for the complete implementation flow, timing formulas, Mermaid diagrams, and
 configuration reference.

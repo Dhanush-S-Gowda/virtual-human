@@ -18,6 +18,7 @@ from tts.supertonic import SupertonicProvider
 from tts.voices import VOICES, DEFAULT_VOICES
 from provider_process import ProviderProcess
 from observability import ResourceReporter, setup
+from memory.service import configured_memory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,15 +53,18 @@ def build_providers():
     return SimpleNamespace(llm=llm, tts=tts, stt=stt)
 
 
-def create_app(providers=None):
+def create_app(providers=None, memory=None):
     @asynccontextmanager
     async def lifespan(application):
         setup("conversation_api")
         application.state.providers = providers or build_providers()
         resources = ResourceReporter("conversation_api")
         application.state.conversations = OrderedDict()
+        application.state.memory = memory or configured_memory(settings)
+        if application.state.memory:
+            await application.state.memory.start()
         application.state.conversation_manager = ConversationManager(
-            application.state.providers.llm, application.state.conversations)
+            application.state.providers.llm, application.state.conversations, application.state.memory)
         try:
             for provider_name in ("stt", "tts"):
                 provider = getattr(application.state.providers, provider_name)
@@ -81,6 +85,8 @@ def create_app(providers=None):
         finally:
             resources.close()
             application.state.conversations.clear()
+            if application.state.memory:
+                await application.state.memory.close()
             for provider_name in ("tts", "stt"):
                 close = getattr(getattr(application.state.providers, provider_name), "close", None)
                 if close:
@@ -100,6 +106,7 @@ def create_app(providers=None):
     @application.get("/health")
     async def health():
         return {"status": "ok", "transport": "websocket", "endpoint": "/ws",
+                "memory": application.state.memory.status() if getattr(application.state, "memory", None) else {"enabled": False},
                 "playback": {"tts_volume_gain": settings.tts_volume_gain,
                              "gesture_pacing": settings.gesture_pacing,
                              "gesture_min_duration_seconds": settings.gesture_min_duration_seconds},

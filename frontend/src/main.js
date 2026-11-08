@@ -324,6 +324,11 @@ const sttManager = new STTManager({
             if (action) speechActions.add(action);
         } else if (event.type === "llm_delta") {
             conversationLog.appendReplyDelta(event.text);
+        } else if (event.type === "memory_context") {
+            const memory = event.data;
+            setSpeechLatency("memory", memory?.available
+                ? `memory → model: ${memory.retrieved} saved notes, ${memory.recent_turns} recent turns`
+                : "saved memory unavailable; using recent conversation");
         } else if (event.type === "world_state") {
             const scene = event.data;
             const reason = { stale: "last frame expired", no_frames: "waiting for frames",

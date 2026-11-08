@@ -3,6 +3,32 @@
 Local change owner: **Bhvan Madhusudhan**. Upstream commits retain their original
 authorship. Entries describe implemented changes and the checks actually run.
 
+## 2026-11-08 - Persistent conversation memory and retrieval
+
+Change owner: **Bhvan Madhusudhan**.
+
+- Added SQLite turn persistence, recent-history restoration, and saved speech
+  preferences. Memory persists across backend restarts.
+- Added local all-minilm embeddings, FTS5 keyword fallback, and a hybrid
+  reranker with correction, recency, and duplicate handling.
+- Added bounded historical context on each request. Current camera evidence
+  remains separate from remembered personal facts.
+- Added Celery embedding jobs through Redis. Jobs contain row IDs; the worker
+  reads conversation text from the shared backend volume.
+- Persisted browser conversation IDs across tabs and restarts, with migration
+  from the existing tab ID. Different browser profiles remain separate.
+- Added memory health, activity counts, metrics, configuration validation,
+  component documentation, and a repeatable isolated local-model evaluation.
+- Validation: 349 backend tests passed, one skipped, and seven subtests passed;
+  113 frontend tests passed. Backend and frontend Docker builds passed.
+  Both local Qwen recall checks passed; see the
+  [recorded results](docs/prompt-evaluation/2026-11-08/memory.md).
+  The updated backend, worker, and frontend are healthy. A real Redis/Celery
+  job saved an embedding to SQLite; its temporary test conversation was removed.
+- Limits: no recovery of history already lost from RAM; browser IDs do not
+  authenticate users; retrieval is bounded and does not guarantee perfect recall.
+  Cold model startup can still delay replies.
+
 ## 2026-11-08 - Prompt grounding and response quality
 
 Change owner: **Bhvan Madhusudhan**.

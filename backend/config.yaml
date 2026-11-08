@@ -85,6 +85,19 @@ temperature: 0.7
 max_tokens: 256
 history_turns: 8
 max_audio_bytes: 10000000
+# Persistent conversation memory and retrieval (separate from camera identity).
+memory:
+  enabled: true
+  database: data/conversation-memory.sqlite3
+  max_turns: 2000
+  semantic_enabled: true
+  embedding_url: http://127.0.0.1:11434
+  embedding_model: all-minilm
+  embedding_timeout: 1.5
+  top_k: 4
+  candidate_count: 30
+  context_chars: 6000
+
 # Dedicated workers for models loaded by this app. External servers are untouched.
 # auto prefers separate efficiency cores on hybrid Linux CPUs; [] disables affinity.
 model_workers:
